@@ -6,10 +6,15 @@ from pytesseract import pytesseract
 from date_utils import DateComponentClassifier
 
 date_component = DateComponentClassifier()
+pytesseract_config = "--oem 3 --psm 11"
 
 
 def ocr(img):
-    data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+    data = pytesseract.image_to_data(
+        img,
+        config=pytesseract_config,
+        output_type=pytesseract.Output.DICT
+    )
     words = []
     bboxes = []
     for txt, left, top, width, height in zip(

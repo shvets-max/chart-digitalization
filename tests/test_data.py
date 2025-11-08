@@ -137,3 +137,47 @@ minimal_power_of_10_data = [
     ([100.0, 200.0, 300.0], 0),
     ([0.0001, 0.0002, 0.0003], 4),
 ]
+
+ensure_numeric_consistency_data = [
+    # Test case 1: Simple linear descending numbers
+    # (no missing points, 5.0 instead of 0.05, minuses missing)
+    (
+        {"column_numbers": [0.25, 0.2, 0.15, 0.1, 5.0, 0.0, 0.05, 0.1],
+         "bboxes_y_centers": [423.5, 456.5, 490.5, 523.5, 557.5, 591.5, 624.5, 658.5]},
+        ([0.25, 0.2, 0.15, 0.1, 0.05, 0.0, -0.05, -0.1],
+         [423.5, 456.5, 490.5, 523.5, 557.5, 591.5, 624.5, 658.5])
+    ),
+
+    # Test case 2: Simple linear descending numbers
+    # (no missing points, 2 instead of 0.2, 5.0 instead of 0.05, minuses missing)
+    (
+        {"column_numbers": [1.0, 0.8, 0.6, 2.0, 0.0, 5.0, 0.2],
+         "bboxes_y_centers": [100.0, 150.0, 200.0, 250.0, 300.0, 350.0, 400.0]},
+        ([1.0, 0.8, 0.6, 0.4, 0.2, 0.0, -0.2],
+         [100.0, 150.0, 200.0, 250.0, 300.0, 350.0, 400.0])
+    ),
+
+    # Test case 3: Linear descending numbers with missing minuses
+    (
+        {"column_numbers": [15.0, 10.0, 0.0, 5.0],
+         "bboxes_y_centers": [100.0, 150.0, 250.0, 300.0]},
+        ([15.0, 10.0, 5.0, 0.0, -5.0],
+         [100.0, 150.0, 200.0, 250.0, 300.0])
+    ),
+
+    # Test case 4: Linear descending numbers with one missing point
+    (
+        {"column_numbers": [100.0, 80.0, 60.0, 20.0],
+         "bboxes_y_centers": [100.0, 150.0, 200.0, 300.0]},
+        ([100.0, 80.0, 60.0, 40.0, 20.0],
+         [100.0, 150.0, 200.0, 250.0, 300.0])
+    ),
+
+    # Test case 5: Linear descending numbers with two missing points
+    (
+        {"column_numbers": [1000.0, 800.0, 200.0],
+         "bboxes_y_centers": [50.0, 100.0, 250.0]},
+        ([1000.0, 800.0, 600.0, 400.0, 200.0],
+         [50.0, 100.0, 150.0, 200.0, 250.0])
+    ),
+]
