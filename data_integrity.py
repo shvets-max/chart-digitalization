@@ -1,66 +1,91 @@
+from typing import Iterable
+
 import numpy as np
 
 
-def minimal_power_of_10(float_series: list) -> int:
-    decimals = (
-        len(str(f).split(".")[-1].rstrip("0")) if "." in str(f) else 0
-        for f in float_series
-    )
-    return max(decimals)
+def find_minimal_powers_of_10(float_series: Iterable[float]) -> list[int]:
+    """
+    Find the minimal power of 10 needed to convert the fractional parts
+    of the float numbers in `float_series` to integers.
+
+    :param float_series: Iterable of float numbers
+    :return: List of minimal powers of 10 for each float number
+    """
+    float_series_strings = (str(f) for f in float_series)
+    return [
+        len(s.split(".")[-1].rstrip("0")) if "." in s else 0
+        for s in float_series_strings
+    ]
 
 
-def ensure_numeric_consistency(
-    column_numbers: np.ndarray,
-    bboxes_y_centers: np.ndarray,
+def ensure_linear_continuity(
+    x1: np.ndarray,
+    x2: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    min_power = minimal_power_of_10(column_numbers.tolist())
+    """
+    Ensure that the numeric values in `column_numbers` are consistent and linear,
+    filling in any missing points based on the `bboxes_y_centers`.
+
+    :param x1:
+    :param x2:
+    :return:
+    """
+    min_powers_of_10 = find_minimal_powers_of_10(x1)
+    min_power = max(min_powers_of_10)
     multiplier = 10**min_power
 
-    diffs = np.diff(np.array(column_numbers) * multiplier).round().astype(int)
+    diffs = np.diff(x1 * multiplier).round().astype(int)
+    abs_diffs = np.abs(diffs)
     counts = np.bincount(abs(diffs))
     vals = np.nonzero(counts)[0]
     counts = counts[vals]
-    # is_linear = counts.size < diffs.size
+    base_diff = vals[np.argmax(counts)]
+    abs_diffs = np.concatenate([[base_diff], abs_diffs])
 
-    missing_points = find_missing_points(bboxes_y_centers)
-    n_points = len(column_numbers) + len(missing_points)
+    interpolation_points = (
+        (np.array(min_powers_of_10) == 0) & (abs_diffs != base_diff) & (x1 != 0)
+    )
+    for idx in np.flatnonzero(interpolation_points):
+        if idx == 0 or idx == len(x1) - 1:
+            continue
+        lp, rp = x1[idx - 1], x1[idx + 1]
+        x1[idx] = (lp + rp) / 2
+
+    # Find missing points in bboxes_y_centers
+    missing_points = find_missing_points(x2)
+    n_points = len(x1) + len(missing_points)
 
     # ensure numbers are in descending order
-    base = vals[np.argmax(counts)]
-    column_numbers = np.array([
-        round(column_numbers[0] - i * base / multiplier, min_power)
-        for i in range(n_points)
-    ])
+    final_x1 = np.array(
+        [round(x1[0] - i * base_diff / multiplier, min_power) for i in range(n_points)]
+    )
 
-    if missing_points:
-        for mp in missing_points:
-            bboxes_y_centers = np.append(bboxes_y_centers, mp)
-    #     assigned = assign_numbers_to_missing_points(
-    #         bboxes_y_centers, column_numbers, missing_points
-    #     )
-    #     for mp, val in zip(missing_points, assigned):
-    #         if val is not None:
-    #             bboxes_y_centers = np.append(bboxes_y_centers, mp)
-    #             column_numbers = np.append(column_numbers, val)
-    #
-    #     argsort = np.argsort(bboxes_y_centers)
-    #     bboxes_y_centers = bboxes_y_centers[argsort]
-    #     column_numbers = np.array(column_numbers)[argsort]
+    final_x2 = x2.copy()
+    if not missing_points:
+        return final_x1, final_x2
 
-    return column_numbers, bboxes_y_centers
+    final_x2 = np.sort(np.concatenate([final_x2, missing_points]))
+    return final_x1, final_x2
 
 
-def find_missing_points(arr):
-    bboxes_y_centers = np.sort(np.array(arr))
-    diffs = np.diff(bboxes_y_centers)
+def find_missing_points(arr: np.ndarray):
+    """
+    Find missing points in a sorted array based on expected step size.
+
+    :param arr:
+    :return:
+    """
+    arr_sorted = np.sort(arr)
+    diffs = np.diff(arr_sorted)
+
     # Use the most common diff as the expected step
-    step = np.bincount(diffs.astype(int)).argmax()
+    step = np.bincount(diffs.round().astype(int)).argmax()
     missing_points = []
     for i, d in enumerate(diffs):
         if d > step * 1.5:  # Allow some tolerance
             num_missing = int(round(d / step)) - 1
             for j in range(num_missing):
-                missing = bboxes_y_centers[i] + (j + 1) * step
+                missing = arr_sorted[i] + (j + 1) * step
                 missing_points.append(missing)
     return missing_points
 

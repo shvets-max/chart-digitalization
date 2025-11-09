@@ -25,7 +25,7 @@ repos:
     hooks:
       - id: flake8
         language_version: python3.11
-        args: ["--max-line-length=88"]
+        args: ["--max-line-length=88", "--ignore=E203"]
 
   - repo: local
     hooks:

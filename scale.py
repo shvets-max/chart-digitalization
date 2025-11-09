@@ -2,7 +2,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from data_integrity import ensure_numeric_consistency
+from data_integrity import ensure_linear_continuity
 from function import Linear, LinearDatetime, Logarithmic
 
 
@@ -32,30 +32,27 @@ def is_log_scale(numbers: np.ndarray, tolerance: float = 0.98) -> bool:
     return abs(corr) > tolerance
 
 
-def create_y_scale(column_numbers, column_bboxes) -> Optional[Callable]:
+def create_y_scale(values, column_bboxes) -> Optional[Callable]:
     """
 
-    :param column_numbers:
+    :param values:
     :param column_bboxes:
     :return: function mapping y-coordinate to value. Function should be reversible.
     """
-    if len(column_bboxes) != len(column_numbers):
+    if len(column_bboxes) != len(values):
         raise ValueError("Number of bounding boxes and numbers must match")
 
-    if len(column_numbers) < 2:
+    if len(values) < 2:
         return None
 
-    bboxes_y_centers = np.array([(box[1] + box[3]) / 2 for box in column_bboxes])
+    knots = np.array([(box[1] + box[3]) / 2 for box in column_bboxes])
+    values, knots = ensure_linear_continuity(x1=np.array(values), x2=np.array(knots))
 
-    # Ensure numeric consistency
-    column_numbers, bboxes_y_centers = ensure_numeric_consistency(
-        column_numbers, bboxes_y_centers
-    )
-    argsort = np.argsort(bboxes_y_centers)
-    y_sorted = bboxes_y_centers[argsort]
-    n_sorted = np.array(column_numbers)[argsort]
+    arg_sorted = np.argsort(knots)
+    y_sorted = knots[arg_sorted]
+    n_sorted = np.array(values)[arg_sorted]
 
-    if is_log_scale(column_numbers):
+    if is_log_scale(values):
         return Logarithmic(y_sorted[0], y_sorted[-1], n_sorted[0], n_sorted[-1])
     else:
         return Linear(y_sorted[0], y_sorted[-1], n_sorted[0], n_sorted[-1])

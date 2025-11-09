@@ -85,8 +85,14 @@ def find_largest_rectangle(img):
     return x1, y1, x2 - x1, y2 - y1  # (x, y, w, h)
 
 
-def get_column_bboxes(bboxes, x_overlap_thresh=0.7):
-    # bboxes: list of [left, top, right, bottom]
+def get_column_bboxes(bboxes: list, x_overlap_thresh: float = 0.7):
+    """
+    Group bounding boxes into columns based on horizontal overlap.
+
+    :param bboxes:
+    :param x_overlap_thresh:
+    :return:
+    """
     ids, columns = [], []
     used = set()
     for i, box in enumerate(bboxes):
@@ -112,8 +118,14 @@ def get_column_bboxes(bboxes, x_overlap_thresh=0.7):
     return ids, columns
 
 
-def get_row_bboxes(bboxes, y_overlap_thresh=0.7):
-    # bboxes: list of [left, top, right, bottom]
+def get_row_bboxes(bboxes: list, y_overlap_thresh: float = 0.7):
+    """
+    Group bounding boxes into rows based on vertical overlap.
+
+    :param bboxes:
+    :param y_overlap_thresh:
+    :return:
+    """
     ids, rows = [], []
     used = set()
     for i, box in enumerate(bboxes):
