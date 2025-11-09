@@ -11,9 +11,7 @@ pytesseract_config = "--oem 3 --psm 11"
 
 def ocr(img):
     data = pytesseract.image_to_data(
-        img,
-        config=pytesseract_config,
-        output_type=pytesseract.Output.DICT
+        img, config=pytesseract_config, output_type=pytesseract.Output.DICT
     )
     words = []
     bboxes = []
@@ -47,7 +45,7 @@ def texts_to_numbers(texts):
                 num = float(text)
             numbers.append(num)
         except ValueError:
-            continue
+            numbers.append(-1.0)
     return numbers
 
 

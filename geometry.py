@@ -2,6 +2,68 @@ import cv2
 import numpy as np
 
 
+def cut_chart_area(
+    img: np.array,
+    rows_bboxes: list,
+    columns_bboxes: list,
+) -> tuple[np.array, tuple[int, int]]:
+    """
+    0. Cut chart area - stage 1: locate x and y axes to exclude them from chart area
+    1. Cut chart area - stage 2: cut empty edges
+    :param img:
+    :param rows_bboxes:
+    :param columns_bboxes:
+    :return: chart_area, offset
+    """
+    h, w = img.shape
+
+    # 1. Locate x and y axes to exclude them from chart area
+    y1_min = np.min([b[1] for b in rows_bboxes])
+    y2_max = np.max([b[3] for b in rows_bboxes])
+    x1_min = np.min([b[0] for b in columns_bboxes])
+    x2_max = np.max([b[2] for b in columns_bboxes])
+
+    is_bottom = y2_max > h * 0.5
+    is_right = x2_max > w * 0.5
+
+    if is_bottom:
+        y = 0
+        h = y1_min
+    else:
+        y = h - (h - y2_max)
+        h = h - y
+
+    if is_right:
+        x = 0
+        w = x1_min
+    else:
+        x = w - (w - x2_max)
+        w = w - x
+
+    chart_area = img[y : y + h, x : x + w]
+    offset = (x, y)
+
+    # 2. Cut empty edges
+    sum_over_x = chart_area.sum(axis=1)
+    sum_over_y = chart_area.sum(axis=0)
+
+    non_zero_xs = np.nonzero(sum_over_x)[0]
+    non_zero_ys = np.nonzero(sum_over_y)[0]
+
+    non_zero_x_range = (non_zero_xs[0], non_zero_xs[-1])
+    non_zero_y_range = (non_zero_ys[0], non_zero_ys[-1])
+
+    new_x = non_zero_y_range[0]
+    new_y = non_zero_x_range[0]
+    new_w = non_zero_y_range[1] - non_zero_y_range[0]
+    new_h = non_zero_x_range[1] - non_zero_x_range[0]
+
+    chart_area = chart_area[new_y : new_y + new_h, new_x : new_x + new_w]
+    offset = (offset[0] + new_x, offset[1] + new_y)
+
+    return chart_area, offset
+
+
 def find_largest_empty_rectangle(img_shape, bboxes):
     mask = np.zeros(img_shape[:2], dtype=np.uint8)
     for left, top, right, bottom in bboxes:

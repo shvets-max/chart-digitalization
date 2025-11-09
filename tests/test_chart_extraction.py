@@ -9,6 +9,9 @@ import numpy as np
 from chart_extraction import extract_time_series
 
 TEST_DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+LINE_SCALE_DIR = os.path.join(TEST_DATA_DIR, "linear_scaled")
+LOG_SCALE_DIR = os.path.join(TEST_DATA_DIR, "log_scaled")
+
 SEP = ";"
 
 
@@ -38,23 +41,42 @@ class TestChartExtraction(TestCase):
     def setUp(self):
         # load expected results from CSV
         self.expected_results = {}
-        for file in os.listdir(TEST_DATA_DIR):
+        for file in os.listdir(LINE_SCALE_DIR):
             if file.endswith(".csv"):
-                idx = "".join(d for d in file if d.isdigit())
-                with open(os.path.join(TEST_DATA_DIR, file), newline="") as csvfile:
+                idx = file.rstrip(".csv")
+                with open(os.path.join(LINE_SCALE_DIR, file), newline="") as csvfile:
                     reader = csv.reader(csvfile, delimiter=SEP)
                     next(reader)  # skip header
                     # load timeseries data
                     self.expected_results[idx] = {
-                        datetime.strptime(row[0], "%d.%m.%Y").date(): [
+                        datetime.strptime(row[0], "%Y-%m-%d").date(): [
                             float(val.replace(",", ".")) for val in row[1:]
                         ]
                         for row in reader
                     }
 
+        # for file in os.listdir(LOG_SCALE_DIR):
+        #     if file.endswith(".csv"):
+        #         idx = file.rstrip(".csv")
+        #         with open(os.path.join(LOG_SCALE_DIR, file), newline="") as csvfile:
+        #             reader = csv.reader(csvfile, delimiter=SEP)
+        #             next(reader)  # skip header
+        #             # load timeseries data
+        #             self.expected_results[idx] = {
+        #                 datetime.strptime(row[0], "%Y-%m-%d").date(): [
+        #                     float(val.replace(",", ".")) for val in row[1:]
+        #                 ]
+        #                 for row in reader
+        #             }
+
     def test_chart_extraction(self):
         for idx, expected in self.expected_results.items():
-            image_path = os.path.join(TEST_DATA_DIR, f"img_{idx}.png")
+            print(idx)
+            if idx.startswith("linear_"):
+                image_path = os.path.join(LINE_SCALE_DIR, f"{idx}.png")
+            else:
+                image_path = os.path.join(LOG_SCALE_DIR, f"{idx}.png")
+
             extracted_data = extract_time_series(image_path)
             extracted_data = {dt.date(): val for dt, val in extracted_data}
 
@@ -88,6 +110,9 @@ class TestChartExtraction(TestCase):
                         for ev, dv in zip(expected_values, extracted_datapoints)
                     ]
                 )
+
+            print(40 * "-")
+            print(f"Results for image img_{idx}:")
 
             abs_errors = np.array(abs_errors)
             rel_errors = np.array(rel_errors)

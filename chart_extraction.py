@@ -1,20 +1,24 @@
+import os
+
 import cv2
 import numpy as np
 
-from geometry import (
-    find_largest_empty_rectangle,
-    find_largest_rectangle,
-    get_column_bboxes,
-    get_row_bboxes,
-)
+from geometry import cut_chart_area, get_column_bboxes, get_row_bboxes
 from ocr_utils import ocr, texts_to_datetimes, texts_to_numbers
 from scale import create_x_scale, create_y_scale
 
 
 def extract_time_series(image_path):
     # Load image
+    if not os.path.exists(image_path):
+        raise FileNotFoundError(f"Image file not found: {image_path}")
+
     img = cv2.imread(image_path)
-    texts, bboxes = ocr(img)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    texts, bboxes = ocr(gray)
+
+    # Threshold to get the line (assuming black line on white background)
+    thresh = (gray < 250).astype(np.uint8)
 
     # Get Y-scale
     ids, columns_bboxes = get_column_bboxes(bboxes)
@@ -32,33 +36,22 @@ def extract_time_series(image_path):
     row_index = texts_to_datetimes(rows_texts)
     x_scale = create_x_scale(row_index, rows_bboxes)
 
-    offset = (0, 0)
+    chart_area, offset = cut_chart_area(thresh, rows_bboxes, columns_bboxes)
 
-    # get chart area
-    x, y, w, h = find_largest_empty_rectangle(img.shape, bboxes)
-    chart_area = img[y : y + h, x : x + w]
-    offset = (x, y)
-
-    x, y, w, h = find_largest_rectangle(chart_area)
-    chart_area = chart_area[y : y + h, x : x + w]
-    offset = (offset[0] + x, offset[1] + y)
-
-    gray = cv2.cvtColor(chart_area, cv2.COLOR_BGR2GRAY)
-    # Threshold to get the line (assuming black line on white background)
-    thresh = gray < 250
+    # Grid detection
+    grid_y_component_map = chart_area.mean(axis=1) > 0.5
+    grid_x_component = np.nonzero(chart_area.mean(axis=0) > 0.5)[0]
 
     # Find the y-coordinate of the line for each x
     time_series = []
-    height, width = thresh.shape
+    height, width = chart_area.shape
 
-    h_lines_map = thresh.mean(axis=1) > 0.95
     for x in range(width):
+        if x in grid_x_component:
+            continue
         x_date = x_scale(x + offset[0])
-        ys = np.nonzero(thresh[:, x] & ~h_lines_map)[0]
+        ys = np.nonzero(chart_area[~grid_y_component_map, x])[0]
         if ys.size > 0:
-            if np.count_nonzero(ys) / height > 0.5:
-                continue  # skip if too many points (likely grid line)
-
             y = np.mean(ys)
             scaled = y_scale(y + offset[1])
             time_series.append((x_date, [scaled]))
