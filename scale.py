@@ -19,6 +19,9 @@ def estimate_log_base(numbers: np.ndarray) -> float:
 
 def is_log_scale(numbers: np.ndarray, tolerance: float = 0.98) -> bool:
     # Remove zeros and negatives for log
+    if len({round(d) for d in np.diff(numbers)}) == 1:
+        return False
+
     numbers = np.array(numbers)
     log_base = estimate_log_base(numbers)
     if log_base <= 0.8 or log_base >= 1.2:
@@ -32,20 +35,19 @@ def is_log_scale(numbers: np.ndarray, tolerance: float = 0.98) -> bool:
     return abs(corr) > tolerance
 
 
-def create_y_scale(values, column_bboxes) -> Optional[Callable]:
+def create_y_scale(values, knots: np.ndarray) -> Optional[Callable]:
     """
 
     :param values:
-    :param column_bboxes:
+    :param knots:
     :return: function mapping y-coordinate to value. Function should be reversible.
     """
-    if len(column_bboxes) != len(values):
+    if len(knots) != len(values):
         raise ValueError("Number of bounding boxes and numbers must match")
 
     if len(values) < 2:
         return None
 
-    knots = np.array([(box[1] + box[3]) / 2 for box in column_bboxes])
     values, knots = ensure_linear_continuity(x1=np.array(values), x2=np.array(knots))
 
     arg_sorted = np.argsort(knots)
@@ -53,22 +55,22 @@ def create_y_scale(values, column_bboxes) -> Optional[Callable]:
     n_sorted = np.array(values)[arg_sorted]
 
     if is_log_scale(values):
+        print("Using logarithmic scale for y-axis")
         return Logarithmic(y_sorted[0], y_sorted[-1], n_sorted[0], n_sorted[-1])
     else:
+        print("Using linear scale for y-axis")
         return Linear(y_sorted[0], y_sorted[-1], n_sorted[0], n_sorted[-1])
 
 
-def create_x_scale(row_index, row_bboxes) -> Optional[Callable]:
-    if len(row_bboxes) != len(row_index):
+def create_x_scale(row_index, knots: np.ndarray) -> Optional[Callable]:
+    if len(knots) != len(row_index):
         raise ValueError("Number of bounding boxes and index values must match")
 
     if len(row_index) < 2:
         return None
 
-    bboxes_x_centers = np.array([(box[0] + box[2]) / 2 for box in row_bboxes])
-
-    argsort = np.argsort(bboxes_x_centers)
-    x_sorted = bboxes_x_centers[argsort]
+    argsort = np.argsort(knots)
+    x_sorted = knots[argsort]
     idx_sorted = np.array(row_index)[argsort]
 
     if hasattr(idx_sorted[0], "year") and hasattr(idx_sorted[-1], "year"):

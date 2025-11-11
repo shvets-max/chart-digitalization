@@ -23,9 +23,16 @@ def _plot_time_series(extracted, expected, n_series_expected, name: str = "NoNam
         extracted_values = [
             extracted.get(dt, [None] * n_series_expected)[series_idx] for dt in dates
         ]
-        plt.plot(dates, expected_values, label=f"Expected Series {series_idx + 1}")
+        extracted_dates = [
+            dt
+            for dt in dates
+            if extracted.get(dt, [None] * n_series_expected)[series_idx] is not None
+        ]
+        all_dates = sorted({d for d in dates + extracted_dates})
+
+        plt.plot(all_dates, expected_values, label=f"Expected Series {series_idx + 1}")
         plt.plot(
-            dates,
+            all_dates,
             extracted_values,
             label=f"Extracted Series {series_idx + 1}",
             linestyle="-",
@@ -34,6 +41,7 @@ def _plot_time_series(extracted, expected, n_series_expected, name: str = "NoNam
     plt.ylabel("Value")
     plt.title(f"Chart Extraction Comparison for {name}")
     plt.legend()
+    plt.grid()
     plt.show()
 
 
