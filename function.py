@@ -1,66 +1,84 @@
+from abc import ABC, abstractmethod
 from datetime import datetime
 
 import numpy as np
+from scipy.interpolate import interp1d
 
 
-class Linear:
-    def __init__(self, px0, px1, v0, v1):
-        # y = pixel coordinate, v = value
-        self.px0 = px0
-        self.px1 = px1
-        self.v0 = v0
-        self.v1 = v1
-        self.slope = (v1 - v0) / (px1 - px0)  # slope = delta v / delta pixel
-        self.intercept = v0 - self.slope * px0
+class FunctionBase(ABC):
+    @abstractmethod
+    def __call__(self, x):
+        """Forward mapping: pixel to value."""
+        pass
+
+    @abstractmethod
+    def invert(self, v):
+        """Inverse mapping: value to pixel."""
+        pass
+
+
+class Linear(FunctionBase):
+    def __init__(self, knots, values):
+        # knots: pixel coordinates, values: corresponding values
+        self.knots = np.array(knots)
+        self.values = np.array(values)
+        self.interpolator = interp1d(
+            self.knots, self.values, kind="linear", fill_value="extrapolate"
+        )
+        self.inverse_interpolator = interp1d(
+            self.values, self.knots, kind="linear", fill_value="extrapolate"
+        )
 
     def __call__(self, px: int):
-        return self.slope * px + self.intercept
+        return float(self.interpolator(px))
 
     def invert(self, v):
-        return (v - self.intercept) / self.slope
+        return float(self.inverse_interpolator(v))
 
 
-class LinearDatetime:
-    def __init__(self, px0, px1, dt0: datetime, dt1: datetime):
-        # Convert datetimes to timestamps (seconds since epoch)
-        self.px0 = px0
-        self.px1 = px1
-        self.ts0 = dt0.timestamp()
-        self.ts1 = dt1.timestamp()
-        self.slope = (self.ts1 - self.ts0) / (
-            px1 - px0
-        )  # slope = delta time / delta pixel
-        self.intercept = self.ts0 - self.slope * px0
+class LinearDatetime(FunctionBase):
+    def __init__(self, knots, datetimes):
+        # knots: pixel coordinates, datetimes: corresponding datetime objects
+        self.knots = np.array(knots)
+        self.timestamps = np.array([dt.timestamp() for dt in datetimes])
+        self.interpolator = interp1d(
+            self.knots, self.timestamps, kind="linear", fill_value="extrapolate"
+        )
+        self.inverse_interpolator = interp1d(
+            self.timestamps, self.knots, kind="linear", fill_value="extrapolate"
+        )
 
     def __call__(self, px: int):
-        """
-        return timestamp value for given y-coordinate
-        :param px:
-        :return:
-        """
-        return datetime.fromtimestamp(self.slope * px + self.intercept)
+        # Return datetime for given pixel coordinate
+        ts = float(self.interpolator(px))
+        return datetime.fromtimestamp(ts)
 
     def invert(self, dt: datetime):
-        """
-        return y-coordinate for given timestamp value
-        :param dt:
-        :return:
-        """
-        return (dt.timestamp() - self.intercept) / self.slope
+        # Return pixel coordinate for given datetime
+        ts = dt.timestamp()
+        return float(self.inverse_interpolator(ts))
 
 
-class Logarithmic:
-    def __init__(self, y0, y1, v0, v1):
-        # v = a * exp(b * y)
-        self.y0 = y0
-        self.y1 = y1
-        self.v0 = v0
-        self.v1 = v1
-        self.b = np.log(v1 / v0) / (y1 - y0)
-        self.a = v0 / np.exp(self.b * y0)
+class Logarithmic(FunctionBase):
+    def __init__(self, knots, values):
+        # knots: pixel coordinates, values: corresponding values
+        self.knots = np.array(knots)
+        self.log_values = np.log(np.array(values))
+        self.interpolator = interp1d(
+            self.knots, self.log_values, kind="linear", fill_value="extrapolate"
+        )
+        self.inverse_interpolator = interp1d(
+            self.log_values, self.knots, kind="linear", fill_value="extrapolate"
+        )
 
-    def __call__(self, y):
-        return self.a * np.exp(self.b * y)
+    def __call__(self, px: int):
+        # Returns value for given pixel coordinate
+        val = float(np.exp(self.interpolator(px)))
+        if not val:
+            print(val)
+        return val
 
     def invert(self, v):
-        return np.log(v / self.a) / self.b
+        # Returns pixel coordinate for given value
+        log_v = np.log(v)
+        return float(self.inverse_interpolator(log_v))

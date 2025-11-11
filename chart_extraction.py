@@ -3,28 +3,43 @@ import os
 import cv2
 import numpy as np
 
-from geometry import cut_chart_area, get_column_bboxes, get_row_bboxes
+from geometry import cluster_data, cut_chart_area, get_column_bboxes, get_row_bboxes
 from ocr_utils import ocr, texts_to_datetimes, texts_to_numbers
 from scale import create_x_scale, create_y_scale
 
-offset = 3
-EDGE_KERNEL = (
-    np.array([[1, 0, 1], [1, 1, 1], [1, 0, 1], [1, 1, 1], [1, 0, 1]], dtype=np.float32)
-) / 12.0
+
+def adjust_knots_to_grid(knots, grid_centers, min_dist=1, max_dist=10):
+    """
+    Adjusts each knot to the closest grid center if the distance is within
+    (min_dist, max_dist].
+    Returns a new numpy array of adjusted knots.
+    """
+    knots = np.copy(knots)
+    for i in range(len(knots)):
+        diffs = [abs(knots[i] - g) for g in grid_centers]
+        closest_grid = grid_centers[np.argmin(diffs)]
+        if min_dist < abs(knots[i] - closest_grid) <= max_dist:
+            knots[i] = closest_grid
+    return knots
 
 
-def cluster_data(points, margin):
-    points = sorted(points)
-    clusters = []
-    current_cluster = [points[0]]
-    for p in points[1:]:
-        if p - current_cluster[-1] <= margin:
-            current_cluster.append(p)
-        else:
-            clusters.append(current_cluster)
-            current_cluster = [p]
-    clusters.append(current_cluster)
-    return clusters
+def fill_gaps_in_time_series(time_series, window_size=5):
+    """
+    Fill gaps (None values) in the time_series by averaging the nearest previous and
+    next non-None values within a window.
+    Modifies the time_series in place.
+    """
+    for x in range(window_size, len(time_series) - window_size):
+        if time_series[x][1][0] is None:
+            prev_vals = [v[1][0] for v in time_series[x - window_size : x - 1]]
+            next_vals = [v[1][0] for v in time_series[x + 1 : x + window_size]]
+            prev_val = next(
+                (val for val in reversed(prev_vals) if val is not None), None
+            )
+            next_val = next((val for val in next_vals if val is not None), None)
+            if prev_val is not None and next_val is not None:
+                time_series[x] = (time_series[x][0], [(prev_val + next_val) / 2])
+    return time_series
 
 
 def extract_time_series(image_path):
@@ -33,7 +48,6 @@ def extract_time_series(image_path):
         raise FileNotFoundError(f"Image file not found: {image_path}")
 
     img = cv2.imread(image_path)
-    img_area = img.shape[0] * img.shape[1]
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     texts, bboxes = ocr(gray)
 
@@ -54,36 +68,13 @@ def extract_time_series(image_path):
     rows_texts = [texts[i] for i in ids]
     row_index = texts_to_datetimes(rows_texts)
 
-    # mask out the text areas in the chart area
-    for bbox in bboxes:
-        left, top, right, bottom = bbox
-        if abs(right - left) * (bottom - top) > img_area * 0.025:
-            continue
-        thresh[top:bottom, left:right] = 0
-
-    chart_area, location = cut_chart_area(thresh, rows_bboxes, columns_bboxes)
-    x_offset, y_offset, _, _ = location
-
-    # Grid detection
-    grid_y_component_map = chart_area.mean(axis=1) > 0.5
-    grid_x_component_map = chart_area.mean(axis=0) > 0.5
-
-    grid_x_component = np.nonzero(grid_x_component_map)[0]
-    grid_y_component = np.nonzero(grid_y_component_map)[0]
-
-    # cut edges of grid lines
-    grid_l, grid_r = grid_x_component[0], grid_x_component[-1]
-    grid_t, grid_b = grid_y_component[0], grid_y_component[-1]
-    if grid_l < 50:
-        grid_x_component_map[:grid_l] = True
-    if chart_area.shape[1] - grid_r < 50:
-        grid_x_component_map[grid_r:] = True
-    if grid_t < 50:
-        grid_y_component_map[:grid_t] = True
-    if chart_area.shape[0] - grid_b < 50:
-        grid_y_component_map[grid_b:] = True
+    cut_area, location, grid_l = cut_chart_area(thresh, rows_bboxes, columns_bboxes)
+    x_offset, y_offset, x2, y2 = location
 
     # reconstruct grid components
+    grid_y_component_map = cut_area.mean(axis=1) > 0.5
+    grid_x_component_map = cut_area.mean(axis=0) > 0.5
+
     grid_x_component = np.nonzero(grid_x_component_map)[0]
     grid_y_component = np.nonzero(grid_y_component_map)[0]
 
@@ -102,41 +93,61 @@ def extract_time_series(image_path):
     ]
 
     # find the closest grid line to each knot and adjust
-    y_knots_copy = np.copy(y_knots)
-    for i in range(len(y_knots_copy)):
-        diffs = [abs(y_knots_copy[i] - g) for g in grid_y_component_clusters_centers]
-        closest_grid = grid_y_component_clusters_centers[np.argmin(diffs)]
-        if 0 < abs(y_knots_copy[i] - closest_grid) <= 5:
-            y_knots_copy[i] = closest_grid
-    y_knots = y_knots_copy
-
-    x_knots_copy = np.copy(x_knots)
-    for i in range(len(x_knots_copy)):
-        diffs = [abs(x_knots_copy[i] - g) for g in grid_x_component_clusters_centers]
-        closest_grid = grid_x_component_clusters_centers[np.argmin(diffs)]
-        if 0 < abs(x_knots_copy[i] - closest_grid) <= 5:
-            x_knots_copy[i] = closest_grid
-    x_knots = x_knots_copy
+    y_knots = adjust_knots_to_grid(y_knots, grid_y_component_clusters_centers)
+    x_knots = adjust_knots_to_grid(x_knots, grid_x_component_clusters_centers)
 
     y_scale = create_y_scale(column_numbers, y_knots)
     x_scale = create_x_scale(row_index, x_knots)
 
     # Remove grid lines from chart area
-    chart_area_copy = chart_area.copy()
-    chart_area_copy[grid_y_component, :] = 0
-    chart_area_copy[:, grid_x_component] = 0
-    edges = cv2.filter2D(chart_area_copy, -1, EDGE_KERNEL)
+    chart_area = thresh[y_offset:y2, x_offset:x2]
+    chart_area[grid_y_component, :] = 0
+    chart_area[:, grid_x_component] = 0
 
     # Find the y-coordinate of the line for each x
     time_series = []
-    height, width = edges.shape
+    height, width = chart_area.shape
     allowed_margin = 5
 
-    for x in range(width):
-        if x in grid_x_component:
-            continue
+    time_series = extract_time_series_from_chart_area(
+        chart_area,
+        x_scale,
+        y_scale,
+        grid_x_component,
+        grid_y_component_map,
+        grid_l,
+        x_offset,
+        y_offset,
+        allowed_margin=allowed_margin,
+        reversed=False,
+    )
+    time_series = fill_gaps_in_time_series(time_series, window_size=5)
+    return time_series
+
+
+def extract_time_series_from_chart_area(
+    chart_area,
+    x_scale,
+    y_scale,
+    grid_x_component,
+    grid_y_component_map,
+    grid_l,
+    x_offset,
+    y_offset,
+    allowed_margin=5,
+    reversed=False,
+):
+    time_series = []
+    height, width = chart_area.shape
+    x_range = range(width - 1, -1, -1) if reversed else range(width)
+
+    for x in x_range:
         x_date = x_scale(x + x_offset - grid_l)
-        ys = np.nonzero(edges[~grid_y_component_map, x])[0]
+        if x in grid_x_component:
+            time_series.append((x_date, [None]))
+            continue
+
+        ys = np.nonzero(chart_area[~grid_y_component_map, x])[0]
         if ys.size > 0:
             unique_diffs = np.unique(np.diff(ys))
             if unique_diffs.size > 1 and any(
@@ -163,16 +174,14 @@ def extract_time_series(image_path):
             else:
                 y = np.mean(ys)
 
-            scaled = y_scale(y + y_offset + grid_t)
+            scaled = y_scale(y + y_offset)
             time_series.append((x_date, [scaled]))
         else:
             time_series.append((x_date, [None]))  # No data at this x
-    return time_series
+
+    return time_series if not reversed else time_series[::-1]
 
 
 # from PIL import Image
-# c2 = chart_area.copy()
-# c2[grid_y_component, :] = 0
-# c2[:, grid_x_component] = 0
 # im = Image.fromarray(c2*255)
 # im.show()

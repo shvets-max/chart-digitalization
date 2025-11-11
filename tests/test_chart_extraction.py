@@ -78,7 +78,11 @@ class TestChartExtraction(TestCase):
         #             }
 
     def test_chart_extraction(self):
+        overall_abs_errors = []
+        overall_rel_errors = []
         for idx, expected in self.expected_results.items():
+            # if not idx.endswith("_1"):
+            #     continue
             print(idx)
             if idx.startswith("linear_"):
                 image_path = os.path.join(LINE_SCALE_DIR, f"{idx}.png")
@@ -119,6 +123,9 @@ class TestChartExtraction(TestCase):
                     ]
                 )
 
+            overall_abs_errors.extend(abs_errors)
+            overall_rel_errors.extend(rel_errors)
+
             print(40 * "-")
             print(f"Results for image img_{idx}:")
 
@@ -133,6 +140,19 @@ class TestChartExtraction(TestCase):
             print(f"Mean relative error for img_{idx}: {mean_rel_errors}")
             print(f"Std of relative error: {std_rel_errors}")
 
-            _plot_time_series(
-                extracted_data, expected, n_series_expected, name=f"img_{idx}"
-            )
+            # _plot_time_series(
+            #     extracted_data, expected, n_series_expected, name=f"img_{idx}"
+            # )
+
+        print(40 * "=")
+        print("Overall Results:")
+        overall_abs_errors = np.array(overall_abs_errors)
+        overall_rel_errors = np.array(overall_rel_errors)
+        overall_mean_abs_errors = np.mean(overall_abs_errors).round(4)
+        overall_std_abs_errors = np.std(overall_abs_errors).round(4)
+        overall_mean_rel_errors = np.mean(overall_rel_errors).round(4)
+        overall_std_rel_errors = np.std(overall_rel_errors).round(4)
+        print(f"Overall Mean absolute error: {overall_mean_abs_errors}")
+        print(f"Overall Std of absolute error: {overall_std_abs_errors}")
+        print(f"Overall Mean relative error: {overall_mean_rel_errors}")
+        print(f"Overall Std of relative error: {overall_std_rel_errors}")

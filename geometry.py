@@ -2,6 +2,20 @@ import cv2
 import numpy as np
 
 
+def cluster_data(points, margin):
+    points = sorted(points)
+    clusters = []
+    current_cluster = [points[0]]
+    for p in points[1:]:
+        if p - current_cluster[-1] <= margin:
+            current_cluster.append(p)
+        else:
+            clusters.append(current_cluster)
+            current_cluster = [p]
+    clusters.append(current_cluster)
+    return clusters
+
+
 def cut_chart_area(
     img: np.ndarray,
     rows_bboxes: list,
@@ -41,11 +55,11 @@ def cut_chart_area(
         w = w - x
 
     x1, y1, x2, y2 = x, y, x + w, y + h
+    cut_area_1 = img[y1:y2, x1:x2]
 
     # 2. Cut empty edges
-    cut_area = img[y1:y2, x1:x2]
-    sum_over_x = cut_area.sum(axis=1)
-    sum_over_y = cut_area.sum(axis=0)
+    sum_over_x = cut_area_1.sum(axis=1)
+    sum_over_y = cut_area_1.sum(axis=0)
 
     non_zero_xs = np.nonzero(sum_over_x)[0]
     non_zero_ys = np.nonzero(sum_over_y)[0]
@@ -63,10 +77,38 @@ def cut_chart_area(
     x2 = x1 + new_w
     y2 = y1 + new_h
 
+    cut_area_2 = img[y1:y2, x1:x2]
+
+    # 3. Grid-edges cut
+    grid_y_component_map = cut_area_2.mean(axis=1) > 0.5
+    grid_x_component_map = cut_area_2.mean(axis=0) > 0.5
+
+    grid_x_component = np.nonzero(grid_x_component_map)[0]
+    grid_y_component = np.nonzero(grid_y_component_map)[0]
+
+    grid_x_component_clusters = cluster_data(grid_x_component, margin=5)
+    grid_y_component_clusters = cluster_data(grid_y_component, margin=5)
+
+    # cut edges of grid lines
+    grid_l = max(grid_x_component_clusters[0])
+    grid_r = min(grid_x_component_clusters[-1])
+    grid_t = max(grid_y_component_clusters[0])
+    grid_b = min(grid_y_component_clusters[-1])
+
+    if grid_l < 50:
+        x1 += grid_l
+    if cut_area_2.shape[1] - grid_r < 50:
+        x2 -= cut_area_2.shape[1] - grid_r
+    if grid_t < 50:
+        y1 += grid_t
+    if cut_area_2.shape[0] - grid_b < 50:
+        y2 -= cut_area_2.shape[0] - grid_b
+
+    # update chart area
     chart_area = img[y1:y2, x1:x2]
     area_loc = (x1, y1, x2, y2)
 
-    return chart_area, area_loc
+    return chart_area, area_loc, grid_l + new_x1
 
 
 def find_largest_empty_rectangle(img_shape, bboxes):

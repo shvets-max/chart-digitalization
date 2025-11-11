@@ -17,22 +17,25 @@ def estimate_log_base(numbers: np.ndarray) -> float:
     return base
 
 
-def is_log_scale(numbers: np.ndarray, tolerance: float = 0.98) -> bool:
-    # Remove zeros and negatives for log
-    if len({round(d) for d in np.diff(numbers)}) == 1:
+def is_log_scale(numbers: np.ndarray, tolerance: float = 0.1) -> bool:
+    diffs = np.diff(numbers)
+    if max(diffs) - min(diffs) < tolerance:
         return False
 
-    numbers = np.array(numbers)
-    log_base = estimate_log_base(numbers)
-    if log_base <= 0.8 or log_base >= 1.2:
+    # is decreasing?
+    if all(np.diff(numbers) >= 0):
+        sorted_numbers = np.array(numbers.copy())
+    else:
+        sorted_numbers = np.sort(numbers)
+
+    sorted_numbers = sorted_numbers[sorted_numbers > 0]
+    if len(sorted_numbers) < 3:
         return False
-    valid = numbers > 0
-    if np.sum(valid) < 2:
-        return False
-    y = np.arange(len(numbers))[valid]
-    log_vals = np.log(numbers[valid])
-    corr = np.corrcoef(y, log_vals)[0, 1]
-    return abs(corr) > tolerance
+
+    pct_diff = (sorted_numbers[1:] - sorted_numbers[:-1]) / sorted_numbers[1:]
+    if max(pct_diff) - min(pct_diff) < tolerance:
+        return True
+    return False
 
 
 def create_y_scale(values, knots: np.ndarray) -> Optional[Callable]:
@@ -48,18 +51,21 @@ def create_y_scale(values, knots: np.ndarray) -> Optional[Callable]:
     if len(values) < 2:
         return None
 
-    values, knots = ensure_linear_continuity(x1=np.array(values), x2=np.array(knots))
-
-    arg_sorted = np.argsort(knots)
-    y_sorted = knots[arg_sorted]
-    n_sorted = np.array(values)[arg_sorted]
-
     if is_log_scale(values):
         print("Using logarithmic scale for y-axis")
-        return Logarithmic(y_sorted[0], y_sorted[-1], n_sorted[0], n_sorted[-1])
+        arg_sorted = np.argsort(knots)
+        y_sorted = knots[arg_sorted]
+        n_sorted = np.array(values)[arg_sorted]
+        return Logarithmic(knots=y_sorted, values=n_sorted)
     else:
         print("Using linear scale for y-axis")
-        return Linear(y_sorted[0], y_sorted[-1], n_sorted[0], n_sorted[-1])
+        values, knots = ensure_linear_continuity(
+            x1=np.array(values), x2=np.array(knots)
+        )
+        arg_sorted = np.argsort(knots)
+        y_sorted = knots[arg_sorted]
+        n_sorted = np.array(values)[arg_sorted]
+        return Linear(knots=y_sorted, values=n_sorted)
 
 
 def create_x_scale(row_index, knots: np.ndarray) -> Optional[Callable]:
@@ -74,6 +80,6 @@ def create_x_scale(row_index, knots: np.ndarray) -> Optional[Callable]:
     idx_sorted = np.array(row_index)[argsort]
 
     if hasattr(idx_sorted[0], "year") and hasattr(idx_sorted[-1], "year"):
-        return LinearDatetime(x_sorted[0], x_sorted[-1], idx_sorted[0], idx_sorted[-1])
+        return LinearDatetime(knots=x_sorted, datetimes=idx_sorted)
     else:
-        return Linear(x_sorted[0], x_sorted[-1], 0, len(row_index) - 1)
+        return Linear(knots=x_sorted, values=idx_sorted)
