@@ -1,5 +1,7 @@
 import re
 
+from dateutil import parser
+
 YEAR_REGEX = r"19\d{2}|20[0-2]\d"
 MONTH_REGEX = r"0?[1-9]|1[0-2]"
 DAY_REGEX = r"0?[1-9]|[12][0-9]|3[01]"
@@ -62,8 +64,8 @@ class DateComponentClassifier:
             return "month and day"
         # Day, month, and year: e.g. 25-12-2023, 2023/12/25, 25 Dec 2023
         try:
-            # dt = parse(s, fuzzy=False)
+            parser.parse(s, fuzzy=False)
             return "day, month and year"
-        except Exception:
+        except (ValueError, TypeError, OverflowError):
             pass
         return "unknown"

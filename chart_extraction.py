@@ -19,6 +19,8 @@ def adjust_knots_to_grid(knots, grid_centers, min_dist=1, max_dist=10):
     Returns a new numpy array of adjusted knots.
     """
     knots = np.copy(knots)
+    if not len(grid_centers):
+        return knots
     for i in range(len(knots)):
         diffs = [abs(knots[i] - g) for g in grid_centers]
         closest_grid = grid_centers[np.argmin(diffs)]
@@ -190,6 +192,11 @@ def extract_chart(image_path) -> ChartExtraction:
     rows_texts = [texts[i] for i in ids]
     row_index = texts_to_datetimes(rows_texts)
 
+    # Drop axis labels OCR could not parse into a date, keeping bboxes aligned
+    valid = [dt is not None for dt in row_index]
+    rows_bboxes = [box for box, ok in zip(rows_bboxes, valid) if ok]
+    row_index = [dt for dt, ok in zip(row_index, valid) if ok]
+
     cut_area, location, grid_l = cut_chart_area(thresh, rows_bboxes, columns_bboxes)
     x_offset, y_offset, x2, y2 = location
 
@@ -261,6 +268,95 @@ def extract_time_series(image_path):
     return extract_chart(image_path).time_series
 
 
+def ink_rows_in_column(chart_area, grid_y_component_map, rows_kept, x):
+    """Absolute image rows of the non-grid ink in column `x` of the chart area."""
+    return rows_kept[np.nonzero(chart_area[~grid_y_component_map, x])[0]]
+
+
+def column_candidate_rows(
+    chart_area, grid_y_component_map, rows_kept, grid_x_lookup, allowed_margin
+):
+    """
+    Candidate series rows per chart-area column: the mean row of each ink cluster.
+    Columns on a vertical grid line, or with no ink, get an empty list. More than
+    one candidate means something other than the series is drawn in that column.
+    """
+    candidates = []
+    for x in range(chart_area.shape[1]):
+        if x in grid_x_lookup:
+            candidates.append([])
+            continue
+        ys = ink_rows_in_column(chart_area, grid_y_component_map, rows_kept, x)
+        if ys.size == 0:
+            candidates.append([])
+            continue
+        candidates.append(
+            [float(np.mean(cluster)) for cluster in cluster_data(ys, allowed_margin)]
+        )
+    return candidates
+
+
+def _longest_unambiguous_run(candidates) -> Optional[int]:
+    """Index at the middle of the longest run of columns holding a single candidate."""
+    best_length = best_end = run = 0
+    for i, rows in enumerate(candidates):
+        run = run + 1 if len(rows) == 1 else 0
+        if run > best_length:
+            best_length, best_end = run, i
+    if best_length == 0:
+        return None
+    return best_end - best_length // 2
+
+
+def resolve_series_rows(candidates, max_step: float) -> list[Optional[float]]:
+    """
+    Pick one row per column, following the series through columns that also contain
+    other ink.
+
+    A line series is the only ink spanning the full width, so the longest run of
+    unambiguous columns is taken as the series and resolution spreads outwards from
+    it, each column keeping the candidate closest to the last accepted row. Starting
+    from the left instead would let a legend drawn before the series begins capture
+    the whole traversal. Candidates further than `max_step` from the running row are
+    treated as foreign ink and yield None.
+    """
+    resolved: list[Optional[float]] = [None] * len(candidates)
+    seed = _longest_unambiguous_run(candidates)
+    if seed is None:
+        # Every column is ambiguous, so there is no series to lock on to.
+        return [rows[0] if len(rows) == 1 else None for rows in candidates]
+
+    resolved[seed] = candidates[seed][0]
+    for indices in (range(seed + 1, len(candidates)), range(seed - 1, -1, -1)):
+        last = resolved[seed]
+        for i in indices:
+            rows = candidates[i]
+            if not rows:
+                continue
+            closest = min(rows, key=lambda row: abs(row - last))
+            if abs(closest - last) <= max_step:
+                resolved[i] = closest
+                last = closest
+    return resolved
+
+
+def estimate_max_step(candidates, height: int) -> float:
+    """
+    Largest plausible row change between neighbouring columns, from how fast the
+    series actually moves where it is unambiguous. Keeps the interference cut-off
+    adaptive instead of a fixed pixel budget.
+    """
+    unambiguous = [rows[0] if len(rows) == 1 else None for rows in candidates]
+    steps = [
+        abs(b - a)
+        for a, b in zip(unambiguous, unambiguous[1:])
+        if a is not None and b is not None
+    ]
+    if not steps:
+        return height / 2
+    return max(float(np.percentile(steps, 99)) * 4, 8.0)
+
+
 def extract_time_series_from_chart_area(
     chart_area,
     x_scale,
@@ -273,49 +369,26 @@ def extract_time_series_from_chart_area(
     allowed_margin=5,
     reversed=False,
 ):
-    time_series = []
     height, width = chart_area.shape
-    x_range = range(width - 1, -1, -1) if reversed else range(width)
 
-    for x in x_range:
-        x_date = x_scale(x + x_offset - grid_l)
-        if x in grid_x_component:
-            time_series.append((x_date, [None]))
-            continue
+    # Masking out grid rows renumbers what is left, so keep a lookup from the
+    # masked column's index back to the absolute image row.
+    rows_kept = np.nonzero(~grid_y_component_map)[0] + y_offset
+    grid_x_lookup = set(np.asarray(grid_x_component).tolist())
 
-        ys = np.nonzero(chart_area[~grid_y_component_map, x])[0]
-        if ys.size > 0:
-            unique_diffs = np.unique(np.diff(ys))
-            if unique_diffs.size > 1 and any(
-                d > allowed_margin for d in unique_diffs[1:]
-            ):
-                recent_points = [
-                    pt
-                    for _, pt_list in time_series[-5:]
-                    for pt in pt_list
-                    if pt is not None
-                ]
-                if recent_points:
-                    clusters = cluster_data(ys, allowed_margin)
-                    inverted = y_scale.invert(np.mean(recent_points)) - y_offset
-                    if clusters:
-                        closest_cluster = min(
-                            clusters, key=lambda c: abs(np.mean(c) - inverted)
-                        )
-                        y = np.mean(closest_cluster)
-                    else:
-                        y = np.mean(ys)
-                else:
-                    y = np.mean(ys)
-            else:
-                y = np.mean(ys)
+    candidates = column_candidate_rows(
+        chart_area, grid_y_component_map, rows_kept, grid_x_lookup, allowed_margin
+    )
+    rows = resolve_series_rows(candidates, estimate_max_step(candidates, height))
 
-            scaled = y_scale(y + y_offset)
-            time_series.append((x_date, [scaled]))
-        else:
-            time_series.append((x_date, [None]))  # No data at this x
-
-    return time_series if not reversed else time_series[::-1]
+    time_series = [
+        (
+            x_scale(x + x_offset - grid_l),
+            [None if rows[x] is None else y_scale(rows[x])],
+        )
+        for x in range(width)
+    ]
+    return time_series[::-1] if reversed else time_series
 
 
 # from PIL import Image

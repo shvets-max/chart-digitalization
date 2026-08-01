@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.scale import LogScale
-from matplotlib.ticker import ScalarFormatter
+from matplotlib.ticker import FuncFormatter
 
 TEST_DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 SEP = ";"
@@ -37,8 +37,7 @@ def generate_linear_scaled(
     plt.xlabel("Date")
     plt.ylabel("Value")
     plt.title("Simulated Values Over Time")
-    plt.legend()
-    # plt.grid()
+    plt.grid()
     plt.savefig(output_image)
 
 
@@ -68,22 +67,118 @@ def generate_log_scaled(
     plt.title("Simulated Log-Scaled Values Over Time")
     plt.yscale(scale)
     # Force integer tick labels
-    plt.gca().yaxis.set_major_formatter(ScalarFormatter())
-    plt.gca().yaxis.get_major_formatter().set_scientific(False)
+    plt.gca().yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{int(round(x))}"))
 
-    plt.legend()
-    # plt.grid()
+    plt.grid()
     plt.savefig(output_image)
 
 
+def generate_with_in_area_text(
+    start_date,
+    end_date,
+    start_value=100,
+    variant="legend",
+    output_csv="simulated_in_area_text.csv",
+    output_image="simulated_in_area_text.png",
+):
+    """
+    Linear-scaled chart with non-series ink drawn inside the plotting area, the way
+    real screenshots carry legends, watermarks and value badges (see
+    data/ebit-margin.png). `variant` is one of "legend", "watermark", "badge",
+    "marker" or "corners".
+    """
+    trend = np.random.choice([-1, 1])
+    ts = simulate_time_series(
+        start_date, end_date, start_value, avg_daily_return=1e-3 * trend
+    )
+    ts.to_csv(output_csv, index=False, sep=SEP)
+
+    plt.figure(figsize=(12, 6))
+    ax = plt.gca()
+    ax.plot(ts["date"], ts["value"])
+    plt.xlabel("Date")
+    plt.ylabel("Value")
+    plt.title("Simulated Values Over Time")
+    plt.grid()
+
+    common = dict(transform=ax.transAxes, color="black")
+    if variant == "legend":
+        # Header strip in the top-left, like a chart widget's title bar.
+        ax.text(0.01, 0.96, "ACME: Revenue (TTM)   11.75%", fontsize=11, **common)
+    elif variant == "watermark":
+        # Large faint text across the middle, overlapping the series itself.
+        ax.text(
+            0.5,
+            0.5,
+            "SAMPLE",
+            fontsize=48,
+            alpha=0.35,
+            ha="center",
+            va="center",
+            **common,
+        )
+    elif variant == "badge":
+        # Value badge pinned to the right edge, next to the last data point.
+        ax.text(
+            0.995,
+            0.5,
+            "123.45",
+            fontsize=11,
+            ha="right",
+            va="center",
+            bbox=dict(facecolor="0.5", edgecolor="none"),
+            **common,
+        )
+    elif variant == "marker":
+        # Isolated annotation dot away from the series.
+        ax.plot(
+            [0.45],
+            [0.75],
+            marker="o",
+            markersize=4,
+            linestyle="",
+            **common,
+        )
+    elif variant == "corners":
+        # Text in every corner, so both the leading and trailing columns are
+        # ambiguous and cannot rely on an already-resolved neighbour.
+        for x, y, ha, va in (
+            (0.005, 0.97, "left", "top"),
+            (0.995, 0.97, "right", "top"),
+            (0.005, 0.03, "left", "bottom"),
+            (0.995, 0.03, "right", "bottom"),
+        ):
+            ax.text(x, y, "note", fontsize=10, ha=ha, va=va, **common)
+    else:
+        raise ValueError(f"Unknown variant: {variant}")
+
+    plt.savefig(output_image)
+    plt.close()
+
+
+IN_AREA_TEXT_VARIANTS = ("legend", "watermark", "badge", "marker", "corners")
+
+
 if __name__ == "__main__":
-    sample_size = 5
-    linear_path, log_path = (
+    sample_size = 15
+    linear_path, log_path, in_area_path = (
         os.path.join(TEST_DATA_DIR, "linear_scaled"),
         os.path.join(TEST_DATA_DIR, "log_scaled"),
+        os.path.join(TEST_DATA_DIR, "in_area_text"),
     )
     os.makedirs(linear_path, exist_ok=True)
     os.makedirs(log_path, exist_ok=True)
+    os.makedirs(in_area_path, exist_ok=True)
+
+    np.random.seed(20260801)
+    for variant in IN_AREA_TEXT_VARIANTS:
+        generate_with_in_area_text(
+            start_date="2023-01-01",
+            end_date="2025-03-31",
+            variant=variant,
+            output_csv=os.path.join(in_area_path, f"in_area_{variant}.csv"),
+            output_image=os.path.join(in_area_path, f"in_area_{variant}.png"),
+        )
 
     for i in range(sample_size):
         generate_linear_scaled(
