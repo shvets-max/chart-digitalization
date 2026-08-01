@@ -1,6 +1,11 @@
 numpy
+scipy
 opencv-python
 matplotlib
 Pillow
 pytesseract
+python-dateutil
+fastapi
+uvicorn[standard]
+python-multipart
 pre-commit

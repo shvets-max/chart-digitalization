@@ -45,7 +45,7 @@ def texts_to_numbers(texts):
                 num = float(text)
             numbers.append(num)
         except ValueError:
-            numbers.append(-1.0)
+            numbers.append(None)
     return numbers
 
 

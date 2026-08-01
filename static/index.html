@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chart Digitalization</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body class="viz-root">
+  <header class="page-header">
+    <h1>Chart Digitalization</h1>
+    <p class="subtitle">Upload a chart image to recover the time series behind it.</p>
+  </header>
+
+  <main>
+    <!-- Upload -->
+    <section class="panel" id="upload-panel" aria-labelledby="upload-title">
+      <h2 id="upload-title" class="panel-title">Source image</h2>
+      <div class="dropzone" id="dropzone">
+        <input type="file" id="file-input" accept=".png,.jpg,.jpeg,.bmp,.tif,.tiff,.webp" hidden>
+        <p class="dropzone-hint">Drop a chart image here</p>
+        <button type="button" class="button" id="browse-button">Choose image&hellip;</button>
+        <p class="dropzone-note">PNG, JPG, BMP, TIFF or WebP &middot; up to 20&nbsp;MB</p>
+      </div>
+      <p class="status" id="status" role="status" aria-live="polite"></p>
+    </section>
+
+    <!-- Results -->
+    <section class="panel result-panel" id="result-panel" hidden aria-labelledby="result-title">
+      <div class="result-header">
+        <div>
+          <h2 id="result-title" class="panel-title">Extracted series</h2>
+          <p class="result-file" id="result-file"></p>
+        </div>
+        <div class="badges" id="badges"></div>
+      </div>
+
+      <div class="result-body">
+        <div class="canvas-wrap" id="canvas-wrap">
+          <canvas id="overlay-canvas"></canvas>
+          <div class="tooltip" id="tooltip" hidden></div>
+        </div>
+
+        <aside class="controls" aria-label="Overlay options">
+          <fieldset class="control-group">
+            <legend>Overlay</legend>
+            <label class="check">
+              <input type="checkbox" id="opt-series" checked>
+              <span>Extracted series</span>
+            </label>
+            <label class="check">
+              <input type="checkbox" id="opt-area">
+              <span>Detected plot area</span>
+            </label>
+            <label class="slider">
+              <span>Dim original image <output id="opt-dim-value">0%</output></span>
+              <input type="range" id="opt-dim" min="0" max="80" step="5" value="0">
+            </label>
+            <div class="swatches" id="swatches" role="radiogroup" aria-label="Series colour"></div>
+          </fieldset>
+
+          <fieldset class="control-group">
+            <legend>Grid</legend>
+            <label class="field">
+              <span>Source</span>
+              <select id="opt-grid">
+                <option value="off">Off</option>
+                <option value="generated" selected>Generated from scale</option>
+                <option value="detected">Detected in image</option>
+              </select>
+            </label>
+            <label class="slider" id="tick-x-field">
+              <span>Vertical lines <output id="opt-xticks-value">8</output></span>
+              <input type="range" id="opt-xticks" min="2" max="20" step="1" value="8">
+            </label>
+            <label class="slider" id="tick-y-field">
+              <span>Horizontal lines <output id="opt-yticks-value">6</output></span>
+              <input type="range" id="opt-yticks" min="2" max="20" step="1" value="6">
+            </label>
+          </fieldset>
+
+          <fieldset class="control-group">
+            <legend>Numeric scale</legend>
+            <label class="check">
+              <input type="checkbox" id="opt-scale" checked>
+              <span>Show axis values</span>
+            </label>
+            <p class="hint" id="scale-hint"></p>
+          </fieldset>
+
+          <div class="control-group">
+            <a class="button button-primary" id="download-csv" href="#" download>Download CSV</a>
+          </div>
+        </aside>
+      </div>
+
+      <details class="data-table" id="data-details">
+        <summary>Extracted values <span class="muted" id="table-count"></span></summary>
+        <div class="table-scroll">
+          <table id="data-table">
+            <thead id="data-thead"></thead>
+            <tbody id="data-tbody"></tbody>
+          </table>
+        </div>
+      </details>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
