@@ -45,7 +45,7 @@ def texts_to_numbers(texts):
                 num = float(text)
             numbers.append(num)
         except ValueError:
-            numbers.append(-1.0)
+            numbers.append(None)
     return numbers
 
 
@@ -85,6 +85,8 @@ def texts_to_datetimes(texts):
                         year if year else first_year - 1, month if month else 1, int(t)
                     )
                 )
+            else:
+                result.append(None)
         return result
 
     # Fallback: parse as full date

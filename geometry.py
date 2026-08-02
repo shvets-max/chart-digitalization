@@ -4,6 +4,8 @@ import numpy as np
 
 def cluster_data(points, margin):
     points = sorted(points)
+    if not points:
+        return []
     clusters = []
     current_cluster = [points[0]]
     for p in points[1:]:

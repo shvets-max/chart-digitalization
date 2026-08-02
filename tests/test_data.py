@@ -81,6 +81,25 @@ texts_to_datetimes_data = [
         ],
     ),
     (
+        # data/img_7.png: OCR misreads the trailing 'Oct' as 'Oc!'. It must
+        # come back as None rather than being silently dropped, or the
+        # returned list desyncs from the tick bboxes it's paired with.
+        ["Apr", "Jul", "Oct", "2024", "Apr", "Jul", "Oct", "2025", "Apr", "Jul", "Oc!"],
+        [
+            datetime(2023, 4, 1),
+            datetime(2023, 7, 1),
+            datetime(2023, 10, 1),
+            datetime(2024, 1, 1),
+            datetime(2024, 4, 1),
+            datetime(2024, 7, 1),
+            datetime(2024, 10, 1),
+            datetime(2025, 1, 1),
+            datetime(2025, 4, 1),
+            datetime(2025, 7, 1),
+            None,
+        ],
+    ),
+    (
         ["Dec", "15", "2025", "15", "Feb", "15", "Mar", "15", "Apr", "15"],
         [
             datetime(2024, 12, 1),
@@ -125,6 +144,137 @@ texts_to_datetimes_data = [
             datetime(2022, 9, 1),
         ],
     ),
+]
+
+date_component_classify_data = [
+    ("Apr", "month"),
+    ("2024", "year"),
+    ("15", "day"),
+    ("2023-05", "year and month"),
+    ("May 2023", "year and month"),
+    ("25 Dec", "month and day"),
+    ("Dec 25", "month and day"),
+    ("25 Dec 2023", "year and month"),
+    ("25-12-2023", "day, month and year"),
+    ("2023/12/25", "day, month and year"),
+    # OCR garbling of a month label (data/img_7.png misreads 'Oct' as 'Oc!'):
+    # must not be misclassified as a valid date component.
+    ("Oc!", "unknown"),
+    ("garbage123", "unknown"),
+]
+
+# Ink patterns for a chart area that also contains non-series ink (legend text,
+# value badges, stray markers), as in data/ebit-margin.png. '#' marks ink; the y
+# scale is the identity, so every expected value is the pixel row the series was
+# read from. Cases are (description, ascii_rows, expected_values).
+extract_series_interference_data = [
+    (
+        "clean series, no interference",
+        [
+            "......",
+            "......",
+            "......",
+            "......",
+            "......",
+            "######",
+            "......",
+        ],
+        [5.0] * 6,
+    ),
+    (
+        # data/ebit-margin.png x=16: one legend pixel and one series pixel is two
+        # clusters but only a single np.diff value, so a diff-based test misses it
+        # and averages the two into empty space between them.
+        "single-pixel legend glyph above single-pixel series samples",
+        [
+            "......",
+            "...###",
+            "......",
+            "......",
+            "......",
+            "......",
+            "......",
+            "......",
+            "######",
+            "......",
+            "......",
+        ],
+        [8.0] * 6,
+    ),
+    (
+        # Leading columns have no resolved neighbour to disambiguate against, so
+        # the reference row has to be seeded from the first unambiguous column.
+        "interference in the leading columns",
+        [
+            "......",
+            "##....",
+            "......",
+            "......",
+            "......",
+            "......",
+            "......",
+            "......",
+            "######",
+            "......",
+        ],
+        [8.0] * 6,
+    ),
+    (
+        "multi-pixel legend block above the series",
+        [
+            "......",
+            "..####",
+            "..####",
+            "......",
+            "......",
+            "......",
+            "......",
+            "......",
+            "......",
+            "######",
+            "......",
+        ],
+        [9.0] * 6,
+    ),
+    (
+        # The stray red marker in data/ebit-margin.png sits below the series.
+        "stray marker below the series",
+        [
+            "......",
+            "......",
+            "......",
+            "######",
+            "......",
+            "......",
+            "......",
+            "......",
+            "......",
+            "......",
+            "...#..",
+            "......",
+        ],
+        [3.0] * 6,
+    ),
+]
+
+cluster_data_data = [
+    # No points at all: a chart with gridlines on only one axis (e.g.
+    # data/img_4.png, which has horizontal but no vertical gridlines) produces
+    # an empty array here.
+    ([], 5, []),
+    ([10], 5, [[10]]),
+    ([10, 12, 14], 5, [[10, 12, 14]]),
+    ([10, 20, 22, 40], 5, [[10], [20, 22], [40]]),
+    ([10, 15, 21], 5, [[10, 15], [21]]),  # gap exactly at the margin boundary
+]
+
+adjust_knots_to_grid_data = [
+    # No grid lines detected on this axis (e.g. data/img_4.png has no vertical
+    # gridlines): knots must pass through unchanged instead of crashing.
+    ([10.0, 50.0], [], 1, 10, [10.0, 50.0]),
+    ([10.0, 55.0], [15, 50], 1, 10, [15.0, 50.0]),  # within (min, max] -> snapped
+    ([10.0], [10], 1, 10, [10.0]),  # distance 0 <= min_dist -> unchanged
+    ([10.0], [25], 1, 10, [10.0]),  # distance 15 > max_dist -> unchanged
 ]
 
 find_minimal_powers_of_10_data = [
