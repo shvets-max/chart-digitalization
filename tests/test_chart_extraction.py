@@ -8,16 +8,21 @@ import numpy as np
 
 from chart_extraction import (
     adjust_knots_to_grid,
+    extract_chart,
     extract_time_series,
     extract_time_series_from_chart_area,
+    select_axis_tick_group,
+    select_series_clusters,
 )
 from function import Linear
+from ocr_utils import texts_to_numbers
 from tests.test_data import adjust_knots_to_grid_data, extract_series_interference_data
 
 TEST_DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 LINEAR_SCALE_DIR = os.path.join(TEST_DATA_DIR, "linear_scaled")
 LOG_SCALE_DIR = os.path.join(TEST_DATA_DIR, "log_scaled")
 IN_AREA_TEXT_DIR = os.path.join(TEST_DATA_DIR, "in_area_text")
+MULTILINE_DIR = os.path.join(TEST_DATA_DIR, "multiline")
 
 SEP = ";"
 
@@ -233,3 +238,170 @@ class TestInAreaTextExtraction(TestCase):
                         self.MAX_RANGE_REL_ERROR,
                         f"extracted {edge} {got:.4g} is far from {true:.4g} for {idx}",
                     )
+
+
+class TestSelectAxisTickGroup(TestCase):
+    """
+    Unit tests for select_axis_tick_group, isolated from full chart extraction.
+    """
+
+    def test_prefers_parseable_group_over_first_on_a_length_tie(self):
+        # Reproduces a real failure: adding legend text to a chart can produce an
+        # OCR bbox group that ties the true tick-label group in size. Picking by
+        # raw length alone (argmax) breaks the tie in favour of whichever group
+        # comes first, which is wrong whenever that's the non-numeric one.
+        texts = ["Growth", "Margin", "Costs", "100", "200", "300"]
+        ids = [[0, 1, 2], [3, 4, 5]]  # same size; only group 1 is numeric
+        self.assertEqual(select_axis_tick_group(ids, texts, texts_to_numbers), 1)
+
+    def test_empty_ids_returns_zero(self):
+        self.assertEqual(select_axis_tick_group([], [], texts_to_numbers), 0)
+
+
+class TestSelectSeriesClusters(TestCase):
+    """Unit tests for select_series_clusters, isolated from full chart extraction."""
+
+    def test_merged_duplicate_shades_keep_the_saturated_color(self):
+        # A thin anti-aliased line commonly splits into a solid "core" shade and a
+        # lighter "edge" shade blended toward the background. The edge shade can
+        # have MORE ink than the core (thin lines are mostly edge), so picking
+        # whichever shade is more prominent is not enough: the representative
+        # color must be the least background-diluted (most saturated) one.
+        height, width = 20, 40
+        core_mask = np.zeros((height, width), dtype=bool)
+        core_mask[10, :] = True
+        edge_mask = np.zeros((height, width), dtype=bool)
+        edge_mask[10:13, :] = True  # thicker -> more ink, but a lighter shade
+
+        ink_clusters = [
+            {
+                "color": (240, 235, 245),
+                "mask": edge_mask,
+                "count": int(edge_mask.sum()),
+            },
+            {"color": (20, 15, 200), "mask": core_mask, "count": int(core_mask.sum())},
+        ]
+        grid_y_component_map = np.zeros(height, dtype=bool)
+        grid_x_component = np.array([], dtype=int)
+
+        groups = select_series_clusters(
+            ink_clusters, grid_y_component_map, grid_x_component, y_offset=0
+        )
+
+        self.assertEqual(len(groups), 1, "the two shades should merge into one line")
+        self.assertEqual(groups[0]["color"], (20, 15, 200))
+
+    def test_distinct_lines_are_not_merged(self):
+        height, width = 20, 40
+        mask_a = np.zeros((height, width), dtype=bool)
+        mask_a[2, :] = True
+        mask_b = np.zeros((height, width), dtype=bool)
+        mask_b[17, :] = True  # far from mask_a: a genuinely different line
+
+        ink_clusters = [
+            {"color": (0, 0, 200), "mask": mask_a, "count": int(mask_a.sum())},
+            {"color": (200, 0, 0), "mask": mask_b, "count": int(mask_b.sum())},
+        ]
+        grid_y_component_map = np.zeros(height, dtype=bool)
+        grid_x_component = np.array([], dtype=int)
+
+        groups = select_series_clusters(
+            ink_clusters, grid_y_component_map, grid_x_component, y_offset=0
+        )
+
+        self.assertEqual(len(groups), 2)
+
+
+class TestMultilineExtraction(TestCase):
+    """
+    End-to-end extraction of charts with more than one line: legend-based naming
+    and pure color separation with no legend at all. See data/multiline/ for the
+    real dashboard screenshots that motivated this (colored legend text, no
+    swatch icon; several distinctly colored lines with no legend at all).
+    """
+
+    MAX_MEAN_REL_ERROR = 0.05
+
+    @staticmethod
+    def _series_by_date(image_path):
+        extraction = extract_chart(image_path)
+        n_series = len(extraction.time_series[0][1]) if extraction.time_series else 0
+        by_series = [dict() for _ in range(n_series)]
+        for dt, values in extraction.time_series:
+            for series_idx, value in enumerate(values):
+                by_series[series_idx].setdefault(dt.date(), value)
+        return by_series, extraction.series_names
+
+    @staticmethod
+    def _mean_rel_error(expected_col, got_col):
+        common = [d for d in expected_col if got_col.get(d) is not None]
+        if not common:
+            return None
+        return float(
+            np.mean(
+                [abs(got_col[d] - expected_col[d]) / expected_col[d] for d in common]
+            )
+        )
+
+    def test_legend_names_match_each_line(self):
+        """Scenario 1: a legend must name each line correctly, not just detect them."""
+        expected = _load_expected_results(MULTILINE_DIR)["multiline_legend"]
+        n_expected = len(next(iter(expected.values())))
+        expected_by_col = [
+            {d: v[i] for d, v in expected.items()} for i in range(n_expected)
+        ]
+        # CSV column order, fixed by the generator call in tests/data_generation.py
+        expected_names = ["Revenue Growth", "Operating Margin"]
+
+        by_series, names = self._series_by_date(
+            os.path.join(MULTILINE_DIR, "multiline_legend.png")
+        )
+        self.assertEqual(len(by_series), n_expected)
+        self.assertEqual(set(names), set(expected_names))
+
+        for col_idx, name in enumerate(expected_names):
+            series_idx = names.index(name)
+            rel_error = self._mean_rel_error(
+                expected_by_col[col_idx], by_series[series_idx]
+            )
+            self.assertIsNotNone(rel_error, f"no overlapping dates for {name!r}")
+            self.assertLess(
+                rel_error,
+                self.MAX_MEAN_REL_ERROR,
+                f"{name!r} was matched to the wrong line's values",
+            )
+
+    def test_distinct_colors_separate_without_legend(self):
+        """Scenario 2: 3 differently-colored, crossing lines with no legend at all."""
+        expected = _load_expected_results(MULTILINE_DIR)["multiline_colors"]
+        n_expected = len(next(iter(expected.values())))
+        expected_by_col = [
+            {d: v[i] for d, v in expected.items()} for i in range(n_expected)
+        ]
+
+        by_series, names = self._series_by_date(
+            os.path.join(MULTILINE_DIR, "multiline_colors.png")
+        )
+        self.assertEqual(len(by_series), n_expected)
+        self.assertEqual(names, [None] * n_expected, "this chart has no legend")
+
+        used_series = set()
+        for col_idx, expected_col in enumerate(expected_by_col):
+            best_idx, best_error = None, None
+            for series_idx, got_col in enumerate(by_series):
+                error = self._mean_rel_error(expected_col, got_col)
+                if error is not None and (best_error is None or error < best_error):
+                    best_idx, best_error = series_idx, error
+            self.assertIsNotNone(best_idx, f"no series matched csv column {col_idx}")
+            self.assertNotIn(
+                best_idx,
+                used_series,
+                f"csv column {col_idx} matched an already-claimed series -- "
+                "colors were not separated into distinct series",
+            )
+            used_series.add(best_idx)
+            self.assertLess(
+                best_error,
+                self.MAX_MEAN_REL_ERROR,
+                f"csv column {col_idx}: closest matching series is still far off",
+            )
