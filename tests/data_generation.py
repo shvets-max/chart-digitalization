@@ -159,18 +159,93 @@ def generate_with_in_area_text(
 IN_AREA_TEXT_VARIANTS = ("legend", "watermark", "badge", "marker", "corners")
 
 
+def generate_multiline_chart(
+    start_date,
+    end_date,
+    start_values,
+    names=None,
+    colors=None,
+    output_csv="simulated_multiline.csv",
+    output_image="simulated_multiline.png",
+):
+    """
+    Chart with one distinctly colored line per entry in `start_values`, sharing one
+    date index. When `names` is given, each line gets a legend entry whose label
+    text is recolored to match its line -- mirroring the dashboard screenshots in
+    data/multiline/ (colored label text, no separate swatch icon), not
+    matplotlib's default black-text-plus-icon legend.
+    """
+    series = []
+    for start_value in start_values:
+        trend = np.random.choice([-1, 1])
+        series.append(
+            simulate_time_series(
+                start_date, end_date, start_value, avg_daily_return=1e-3 * trend
+            )
+        )
+
+    combined = series[0][["date"]].copy()
+    for i, ts in enumerate(series):
+        combined[f"value{i + 1}"] = ts["value"].values
+    combined.to_csv(output_csv, index=False, sep=SEP)
+
+    plt.figure(figsize=(12, 6))
+    ax = plt.gca()
+    lines = []
+    for i, ts in enumerate(series):
+        label = names[i] if names else None
+        color = colors[i] if colors else None
+        (line,) = ax.plot(ts["date"], ts["value"], label=label, color=color)
+        lines.append(line)
+    plt.xlabel("Date")
+    plt.ylabel("Value")
+    plt.title("Simulated Multi-Series Values Over Time")
+    plt.grid()
+    if names:
+        # handlelength=0 and hiding the handles removes the swatch icon entirely,
+        # leaving only the colored text -- matching the dashboard screenshots in
+        # data/multiline/, which have no icon at all.
+        legend = ax.legend(loc="upper left", handlelength=0, handletextpad=0)
+        for text, line, handle in zip(legend.get_texts(), lines, legend.legend_handles):
+            text.set_color(line.get_color())
+            handle.set_visible(False)
+    plt.savefig(output_image)
+    plt.close()
+
+
 if __name__ == "__main__":
     sample_size = 15
-    linear_path, log_path, in_area_path = (
+    linear_path, log_path, in_area_path, multiline_path = (
         os.path.join(TEST_DATA_DIR, "linear_scaled"),
         os.path.join(TEST_DATA_DIR, "log_scaled"),
         os.path.join(TEST_DATA_DIR, "in_area_text"),
+        os.path.join(TEST_DATA_DIR, "multiline"),
     )
     os.makedirs(linear_path, exist_ok=True)
     os.makedirs(log_path, exist_ok=True)
     os.makedirs(in_area_path, exist_ok=True)
+    os.makedirs(multiline_path, exist_ok=True)
 
     np.random.seed(20260801)
+    generate_multiline_chart(
+        start_date="2023-01-01",
+        end_date="2025-03-31",
+        start_values=[100, 160],
+        names=["Revenue Growth", "Operating Margin"],
+        colors=["tab:red", "tab:blue"],
+        output_csv=os.path.join(multiline_path, "multiline_legend.csv"),
+        output_image=os.path.join(multiline_path, "multiline_legend.png"),
+    )
+    generate_multiline_chart(
+        start_date="2023-01-01",
+        end_date="2025-03-31",
+        start_values=[100, 160, 220],
+        names=None,
+        colors=["tab:red", "tab:blue", "tab:green"],
+        output_csv=os.path.join(multiline_path, "multiline_colors.csv"),
+        output_image=os.path.join(multiline_path, "multiline_colors.png"),
+    )
+
     for variant in IN_AREA_TEXT_VARIANTS:
         generate_with_in_area_text(
             start_date="2023-01-01",

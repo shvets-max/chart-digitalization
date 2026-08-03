@@ -8,8 +8,35 @@ import numpy as np
 
 from function import FunctionBase, Logarithmic
 from geometry import cluster_data, cut_chart_area, get_column_bboxes, get_row_bboxes
+from multiline import cluster_ink_colors, find_legend_entries, match_series_to_legend
 from ocr_utils import ocr, texts_to_datetimes, texts_to_numbers
 from scale import create_x_scale, create_y_scale, log_ticks, nice_ticks
+
+
+def select_axis_tick_group(ids, texts, parser):
+    """
+    Index of the OCR bbox group most likely to be the axis' tick labels: the one
+    with the most entries `parser` (texts_to_numbers or texts_to_datetimes) can
+    actually parse, tie-broken by group size.
+
+    Picking by raw group size alone is ambiguous whenever another group -- e.g.
+    legend text, wrapped title lines -- happens to have the same number of
+    entries; a real tick-label group is defined by parsing as numbers or dates,
+    not merely by how many OCR tokens it contains.
+    """
+    if not ids:
+        return 0
+    scores = []
+    for id_group in ids:
+        try:
+            parsed = parser([texts[i] for i in id_group])
+            valid_count = sum(v is not None for v in parsed)
+        except Exception:
+            # `parser` is only designed for the real tick-label group; probing
+            # groups it was never meant to handle (legend text, titles) can throw.
+            valid_count = 0
+        scores.append((valid_count, len(id_group)))
+    return max(range(len(ids)), key=lambda i: scores[i])
 
 
 def adjust_knots_to_grid(knots, grid_centers, min_dist=1, max_dist=10):
@@ -31,20 +58,28 @@ def adjust_knots_to_grid(knots, grid_centers, min_dist=1, max_dist=10):
 
 def fill_gaps_in_time_series(time_series, window_size=5):
     """
-    Fill gaps (None values) in the time_series by averaging the nearest previous and
+    Fill gaps (None values) in each series by averaging the nearest previous and
     next non-None values within a window.
     Modifies the time_series in place.
     """
-    for x in range(window_size, len(time_series) - window_size):
-        if time_series[x][1][0] is None:
-            prev_vals = [v[1][0] for v in time_series[x - window_size : x - 1]]
-            next_vals = [v[1][0] for v in time_series[x + 1 : x + window_size]]
-            prev_val = next(
-                (val for val in reversed(prev_vals) if val is not None), None
-            )
-            next_val = next((val for val in next_vals if val is not None), None)
-            if prev_val is not None and next_val is not None:
-                time_series[x] = (time_series[x][0], [(prev_val + next_val) / 2])
+    if not time_series:
+        return time_series
+    n_series = len(time_series[0][1])
+    for series_idx in range(n_series):
+        for x in range(window_size, len(time_series) - window_size):
+            if time_series[x][1][series_idx] is None:
+                prev_vals = [
+                    v[1][series_idx] for v in time_series[x - window_size : x - 1]
+                ]
+                next_vals = [
+                    v[1][series_idx] for v in time_series[x + 1 : x + window_size]
+                ]
+                prev_val = next(
+                    (val for val in reversed(prev_vals) if val is not None), None
+                )
+                next_val = next((val for val in next_vals if val is not None), None)
+                if prev_val is not None and next_val is not None:
+                    time_series[x][1][series_idx] = (prev_val + next_val) / 2
     return time_series
 
 
@@ -67,6 +102,7 @@ class ChartExtraction:
     x_pixel_offset: int = 0  # shift between image x and the x_scale domain
     x_is_datetime: bool = False
     y_is_log: bool = False
+    series_names: list = field(default_factory=list)  # legend name per series, or None
 
     def x_value_at(self, x_pixel: float):
         """Axis value (datetime or number) at an image x coordinate."""
@@ -175,8 +211,8 @@ def extract_chart(image_path) -> ChartExtraction:
 
     # Get Y-axis components
     ids, columns_bboxes = get_column_bboxes(bboxes)
-    max_len_id = np.argmax([len(id_group) for id_group in ids]) if ids else 0
-    ids, columns_bboxes = ids[max_len_id], columns_bboxes[max_len_id]
+    best_id = select_axis_tick_group(ids, texts, texts_to_numbers)
+    ids, columns_bboxes = ids[best_id], columns_bboxes[best_id]
     column_texts = [texts[i] for i in ids]
     column_numbers = texts_to_numbers(column_texts)
 
@@ -187,8 +223,8 @@ def extract_chart(image_path) -> ChartExtraction:
 
     # Get X-axis components
     ids, rows_bboxes = get_row_bboxes(bboxes)
-    max_len_id = np.argmax([len(id_group) for id_group in ids]) if ids else 0
-    ids, rows_bboxes = ids[max_len_id], rows_bboxes[max_len_id]
+    best_id = select_axis_tick_group(ids, texts, texts_to_datetimes)
+    ids, rows_bboxes = ids[best_id], rows_bboxes[best_id]
     rows_texts = [texts[i] for i in ids]
     row_index = texts_to_datetimes(rows_texts)
 
@@ -233,20 +269,69 @@ def extract_chart(image_path) -> ChartExtraction:
     chart_area[grid_y_component, :] = 0
     chart_area[:, grid_x_component] = 0
 
-    # Find the y-coordinate of the line for each x
-    time_series = extract_time_series_from_chart_area(
-        chart_area,
-        x_scale,
-        y_scale,
-        grid_x_component,
+    # A legend (if any) must be detected before color separation, not after: small
+    # text is mostly anti-aliased blur, and its scattered pale pixels can otherwise
+    # piece together into a spurious "series" of their own (see
+    # multiline.find_legend_entries). Its bbox is excluded from the ink mask used
+    # for color clustering below.
+    legend_entries = find_legend_entries(
+        texts, bboxes, (x_offset, y_offset, x2, y2), img
+    )
+    ink_mask = chart_area.astype(bool)
+    for entry in legend_entries:
+        left, top, right, bottom = entry["bbox"]
+        ink_mask[
+            max(0, top - y_offset - 2) : bottom - y_offset + 2,
+            max(0, left - x_offset - 2) : right - x_offset + 2,
+        ] = False
+
+    # Separate ink by color: a chart may hold several distinctly colored lines, but
+    # value badges, watermarks and stray markers are also colored ink (see
+    # multiline.cluster_ink_colors and select_series_clusters below for how
+    # genuine series lines are told apart from those).
+    color_chart_area = img[y_offset:y2, x_offset:x2]
+    ink_clusters = cluster_ink_colors(color_chart_area, ink_mask)
+    series_clusters = select_series_clusters(
+        ink_clusters,
         grid_y_component_map,
-        grid_l,
-        x_offset,
+        grid_x_component,
         y_offset,
         allowed_margin=5,
-        reversed=False,
     )
+
+    if series_clusters:
+        width = chart_area.shape[1]
+        time_series = [
+            (
+                x_scale(x + x_offset - grid_l),
+                [
+                    None if cluster["rows"][x] is None else y_scale(cluster["rows"][x])
+                    for cluster in series_clusters
+                ],
+            )
+            for x in range(width)
+        ]
+        series_colors = [cluster["color"] for cluster in series_clusters]
+    else:
+        # Nothing resolved via color separation (e.g. an unusually faint or broken
+        # line): fall back to reading the whole ink mask (legend excluded) as a
+        # single series.
+        time_series = extract_time_series_from_chart_area(
+            ink_mask,
+            x_scale,
+            y_scale,
+            grid_x_component,
+            grid_y_component_map,
+            grid_l,
+            x_offset,
+            y_offset,
+            allowed_margin=5,
+            reversed=False,
+        )
+        series_colors = [ink_clusters[0]["color"]] if ink_clusters else [(0, 0, 0)]
     time_series = fill_gaps_in_time_series(time_series, window_size=5)
+
+    series_names = match_series_to_legend(series_colors, legend_entries)
 
     return ChartExtraction(
         image_size=(int(img.shape[1]), int(img.shape[0])),
@@ -260,6 +345,7 @@ def extract_chart(image_path) -> ChartExtraction:
         x_pixel_offset=int(grid_l),
         x_is_datetime=bool(time_series) and isinstance(time_series[0][0], datetime),
         y_is_log=isinstance(y_scale, Logarithmic),
+        series_names=series_names,
     )
 
 
@@ -357,6 +443,165 @@ def estimate_max_step(candidates, height: int) -> float:
     return max(float(np.percentile(steps, 99)) * 4, 8.0)
 
 
+def resolve_series_pixel_rows(
+    ink_mask, grid_y_component_map, grid_x_component, y_offset, allowed_margin=5
+):
+    """
+    Resolve one row-per-column trajectory from a single ink mask, rejecting ink
+    that doesn't belong to the dominant continuous run (see resolve_series_rows).
+    Rows are absolute image rows, not yet mapped through the y scale.
+    """
+    height = ink_mask.shape[0]
+    rows_kept = np.nonzero(~grid_y_component_map)[0] + y_offset
+    grid_x_lookup = set(np.asarray(grid_x_component).tolist())
+    candidates = column_candidate_rows(
+        ink_mask, grid_y_component_map, rows_kept, grid_x_lookup, allowed_margin
+    )
+    return resolve_series_rows(candidates, estimate_max_step(candidates, height))
+
+
+DEFAULT_MIN_RESOLVED_FRACTION = (
+    0.5  # of columns a color must resolve to count as a series
+)
+DEFAULT_MIN_CANDIDATE_COLUMN_COVERAGE = 0.15  # loose pre-filter before resolving
+NEAR_GRAY_SATURATION_THRESHOLD = 25  # max-min channel spread below this is "gray"
+NEAR_GRAY_MIN_BRIGHTNESS = 150  # mean channel above this is "light" (a real black
+# line is dark; a gridline's anti-aliased edge is desaturated AND light)
+DEFAULT_DUPLICATE_MEDIAN_DISTANCE = 12.0  # px: trajectories this close are one line
+DEFAULT_DUPLICATE_MIN_OVERLAP_FRACTION = 0.3  # of width, to trust the comparison at all
+
+
+def _color_spread(color) -> int:
+    return max(color) - min(color)
+
+
+def _is_same_trajectory(rows_a, rows_b, max_median_distance, min_overlap_fraction):
+    """
+    Whether two resolved row trajectories track the same physical line, judged by
+    the MEDIAN row distance over their shared columns.
+
+    A single anti-aliased line commonly splits into several color shades (edge vs.
+    core), and at steep segments a shade can legitimately sit tens of pixels from
+    another shade of the very same line, purely because the line's slope spreads
+    ink across many rows within one column. The median is robust to those
+    slope-driven outliers, while two genuinely different lines differ by a large
+    margin at most columns, not just a few.
+    """
+    diffs = [
+        abs(a - b) for a, b in zip(rows_a, rows_b) if a is not None and b is not None
+    ]
+    if len(diffs) < min_overlap_fraction * len(rows_a):
+        return False
+    return float(np.median(diffs)) <= max_median_distance
+
+
+def select_series_clusters(
+    ink_clusters,
+    grid_y_component_map,
+    grid_x_component,
+    y_offset,
+    allowed_margin=5,
+    min_resolved_fraction=DEFAULT_MIN_RESOLVED_FRACTION,
+    min_candidate_column_coverage=DEFAULT_MIN_CANDIDATE_COLUMN_COVERAGE,
+    duplicate_median_distance=DEFAULT_DUPLICATE_MEDIAN_DISTANCE,
+    duplicate_min_overlap_fraction=DEFAULT_DUPLICATE_MIN_OVERLAP_FRACTION,
+    near_gray_saturation_threshold=NEAR_GRAY_SATURATION_THRESHOLD,
+    near_gray_min_brightness=NEAR_GRAY_MIN_BRIGHTNESS,
+):
+    """
+    Decide which color clusters from cluster_ink_colors are genuine series lines.
+
+    A raw column-coverage check on ink alone is fooled by anti-aliasing: the blend
+    between a line's color and a nearby gridline forms its own "color" that can
+    span much of the width without being a real line (it appears only in short,
+    scattered runs near each crossing). Instead, every color candidate is run
+    through the same continuity-tracking resolver used for the final extraction:
+    a real line resolves at most columns, while blend artifacts and decorations
+    resolve at few, since neither forms one continuous path.
+
+    That still lets through one specific case: a gridline's own anti-aliased edge,
+    which is desaturated (grid lines are gray) and light (they blend toward the
+    white background, never toward black), yet is crossed by data lines at enough
+    columns to span nearly the whole width. Real series lines are either a
+    saturated color or genuinely dark (a "black" line), never both desaturated and
+    light, so that combination is rejected outright.
+
+    Candidates whose resolved trajectory nearly matches an already-accepted one
+    (e.g. a second anti-aliasing shade of the same line) are merged into it rather
+    than discarded, so no real ink is lost.
+
+    Returns a list of {"color", "mask", "rows", ...} ordered by descending
+    resolved-column count.
+    """
+    if not ink_clusters:
+        return []
+    width = ink_clusters[0]["mask"].shape[1]
+
+    resolved = []
+    for cluster in ink_clusters:
+        color = cluster["color"]
+        if (
+            max(color) - min(color) < near_gray_saturation_threshold
+            and sum(color) / 3 > near_gray_min_brightness
+        ):
+            continue
+        if (
+            np.count_nonzero(cluster["mask"].any(axis=0))
+            < min_candidate_column_coverage * width
+        ):
+            continue
+        rows = resolve_series_pixel_rows(
+            cluster["mask"],
+            grid_y_component_map,
+            grid_x_component,
+            y_offset,
+            allowed_margin,
+        )
+        resolved_count = sum(r is not None for r in rows)
+        if resolved_count >= min_resolved_fraction * width:
+            resolved.append({**cluster, "rows": rows, "resolved_count": resolved_count})
+    resolved.sort(key=lambda c: -c["resolved_count"])
+
+    groups = []
+    for candidate in resolved:
+        match = next(
+            (
+                g
+                for g in groups
+                if _is_same_trajectory(
+                    candidate["rows"],
+                    g["rows"],
+                    duplicate_median_distance,
+                    duplicate_min_overlap_fraction,
+                )
+            ),
+            None,
+        )
+        if match is None:
+            groups.append(dict(candidate))
+            continue
+        merged_mask = match["mask"] | candidate["mask"]
+        merged_rows = resolve_series_pixel_rows(
+            merged_mask,
+            grid_y_component_map,
+            grid_x_component,
+            y_offset,
+            allowed_margin,
+        )
+        match["mask"] = merged_mask
+        match["rows"] = merged_rows
+        match["resolved_count"] = sum(r is not None for r in merged_rows)
+        match["count"] = match["count"] + candidate["count"]
+        # A thin line's anti-aliased blend toward the background can outnumber its
+        # solid core in pixel count, so the more prominent shade isn't necessarily
+        # the truer color. The least diluted (most saturated) shade seen for this
+        # physical line is: dilution moves every channel toward the background,
+        # which only ever narrows the spread between them.
+        if _color_spread(candidate["color"]) > _color_spread(match["color"]):
+            match["color"] = candidate["color"]
+    return groups
+
+
 def extract_time_series_from_chart_area(
     chart_area,
     x_scale,
@@ -369,22 +614,49 @@ def extract_time_series_from_chart_area(
     allowed_margin=5,
     reversed=False,
 ):
-    height, width = chart_area.shape
-
-    # Masking out grid rows renumbers what is left, so keep a lookup from the
-    # masked column's index back to the absolute image row.
-    rows_kept = np.nonzero(~grid_y_component_map)[0] + y_offset
-    grid_x_lookup = set(np.asarray(grid_x_component).tolist())
-
-    candidates = column_candidate_rows(
-        chart_area, grid_y_component_map, rows_kept, grid_x_lookup, allowed_margin
+    width = chart_area.shape[1]
+    rows = resolve_series_pixel_rows(
+        chart_area, grid_y_component_map, grid_x_component, y_offset, allowed_margin
     )
-    rows = resolve_series_rows(candidates, estimate_max_step(candidates, height))
-
     time_series = [
         (
             x_scale(x + x_offset - grid_l),
             [None if rows[x] is None else y_scale(rows[x])],
+        )
+        for x in range(width)
+    ]
+    return time_series[::-1] if reversed else time_series
+
+
+def extract_multi_series_from_chart_area(
+    chart_area,
+    ink_masks,
+    x_scale,
+    y_scale,
+    grid_x_component,
+    grid_y_component_map,
+    grid_l,
+    x_offset,
+    y_offset,
+    allowed_margin=5,
+    reversed=False,
+):
+    """
+    Same as extract_time_series_from_chart_area, but resolves one row-per-column
+    trajectory per mask in `ink_masks` and packs them into a single time series, in
+    mask order.
+    """
+    width = chart_area.shape[1]
+    all_rows = [
+        resolve_series_pixel_rows(
+            mask, grid_y_component_map, grid_x_component, y_offset, allowed_margin
+        )
+        for mask in ink_masks
+    ]
+    time_series = [
+        (
+            x_scale(x + x_offset - grid_l),
+            [None if rows[x] is None else y_scale(rows[x]) for rows in all_rows],
         )
         for x in range(width)
     ]

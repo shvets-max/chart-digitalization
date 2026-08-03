@@ -17,25 +17,34 @@ def estimate_log_base(numbers: np.ndarray) -> float:
     return base
 
 
-def is_log_scale(numbers: np.ndarray, tolerance: float = 0.1) -> bool:
-    diffs = np.diff(numbers)
-    if max(diffs) - min(diffs) < tolerance:
+def _r_squared(x: np.ndarray, y: np.ndarray) -> float:
+    """Goodness of fit of the best straight line through (x, y)."""
+    slope, intercept = np.polyfit(x, y, 1)
+    residuals = y - (slope * x + intercept)
+    centered = y - y.mean()
+    ss_res, ss_tot = float(np.dot(residuals, residuals)), float(
+        np.dot(centered, centered)
+    )
+    return 1.0 - ss_res / ss_tot if ss_tot else 1.0
+
+
+def is_log_scale(values: np.ndarray, knots: np.ndarray) -> bool:
+    """
+    Whether `values` are better explained by an exponential curve over their
+    pixel positions `knots` than by a straight line.
+
+    Comparing consecutive value ratios (the previous approach) assumes ticks are
+    evenly spaced in pixels and breaks whenever they aren't -- e.g. a real log
+    axis labelling round numbers (1, 2, 5 x 10^n) has ticks with varying ratios
+    even though it is genuinely a log scale. Fitting against pixel position
+    instead sidesteps that: ticks are evenly spaced in pixels by construction,
+    so whichever of value/log(value) is actually linear in pixel position wins.
+    """
+    values = np.asarray(values, dtype=float)
+    knots = np.asarray(knots, dtype=float)
+    if len(values) < 3 or np.any(values <= 0):
         return False
-
-    # is decreasing?
-    if all(np.diff(numbers) >= 0):
-        sorted_numbers = np.array(numbers.copy())
-    else:
-        sorted_numbers = np.sort(numbers)
-
-    sorted_numbers = sorted_numbers[sorted_numbers > 0]
-    if len(sorted_numbers) < 3:
-        return False
-
-    pct_diff = (sorted_numbers[1:] - sorted_numbers[:-1]) / sorted_numbers[1:]
-    if max(pct_diff) - min(pct_diff) < tolerance:
-        return True
-    return False
+    return _r_squared(knots, np.log(values)) > _r_squared(knots, values)
 
 
 def nice_ticks(vmin: float, vmax: float, count: int = 6) -> list[float]:
@@ -93,7 +102,7 @@ def create_y_scale(values, knots: np.ndarray) -> Optional[Callable]:
     if len(values) < 2:
         return None
 
-    if is_log_scale(values):
+    if is_log_scale(values, knots):
         print("Using logarithmic scale for y-axis")
         arg_sorted = np.argsort(knots)
         y_sorted = knots[arg_sorted]
