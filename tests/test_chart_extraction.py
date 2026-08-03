@@ -23,6 +23,8 @@ LINEAR_SCALE_DIR = os.path.join(TEST_DATA_DIR, "linear_scaled")
 LOG_SCALE_DIR = os.path.join(TEST_DATA_DIR, "log_scaled")
 IN_AREA_TEXT_DIR = os.path.join(TEST_DATA_DIR, "in_area_text")
 MULTILINE_DIR = os.path.join(TEST_DATA_DIR, "multiline")
+REPO_ROOT = os.path.dirname(os.path.dirname(__file__))
+REAL_MULTILINE_DIR = os.path.join(REPO_ROOT, "data", "multiline")
 
 SEP = ";"
 
@@ -405,3 +407,32 @@ class TestMultilineExtraction(TestCase):
                 self.MAX_MEAN_REL_ERROR,
                 f"csv column {col_idx}: closest matching series is still far off",
             )
+
+    def test_real_screenshots_detect_log_scale_and_legend(self):
+        """
+        Regression test for data/multiline/img.png and img_3.png: both have a
+        "small base" log y-axis (ratio close to 1 between consecutive ticks)
+        that the previous ratio-based is_log_scale misclassified as linear, and
+        img_3.png has a genuine top-left text legend that must be matched to its
+        lines. These screenshots have no ground-truth CSV (see
+        docs/multiline-extraction.md), so this only checks scale type and
+        legend names, not extracted values.
+        """
+        no_legend = extract_chart(os.path.join(REAL_MULTILINE_DIR, "img.png"))
+        self.assertTrue(no_legend.y_is_log, "img.png's log y-axis was not detected")
+        self.assertEqual(
+            no_legend.series_names,
+            [None] * len(no_legend.series_names),
+            "img.png has no text legend, only per-line value badges",
+        )
+
+        with_legend = extract_chart(os.path.join(REAL_MULTILINE_DIR, "img_3.png"))
+        self.assertTrue(with_legend.y_is_log, "img_3.png's log y-axis was not detected")
+        self.assertEqual(
+            set(with_legend.series_names),
+            {
+                "NOW: Price Target High",
+                "NOW: Price Target",
+                "NOW: Price Target Low",
+            },
+        )

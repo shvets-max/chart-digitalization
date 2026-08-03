@@ -105,7 +105,12 @@ def _series_payload(extraction: ChartExtraction) -> list[dict]:
                     "y_value": None if value is None else round(float(value), 6),
                 }
             )
-        series.append({"name": f"series {index + 1}", "points": points})
+        name = (
+            extraction.series_names[index]
+            if index < len(extraction.series_names)
+            else None
+        )
+        series.append({"name": name or f"series {index + 1}", "points": points})
     return series
 
 
