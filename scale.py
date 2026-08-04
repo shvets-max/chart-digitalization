@@ -6,17 +6,6 @@ from data_integrity import ensure_linear_continuity
 from function import Linear, LinearDatetime, Logarithmic
 
 
-def estimate_log_base(numbers: np.ndarray) -> float:
-    numbers = np.array(numbers)
-    valid = numbers > 0
-    y = np.arange(len(numbers))[valid]
-    log_vals = np.log(numbers[valid])
-    # Linear regression: log_vals = intercept + slope * y
-    slope, intercept = np.polyfit(y, log_vals, 1)
-    base = np.exp(slope)
-    return base
-
-
 def _r_squared(x: np.ndarray, y: np.ndarray) -> float:
     """Goodness of fit of the best straight line through (x, y)."""
     slope, intercept = np.polyfit(x, y, 1)
@@ -26,6 +15,49 @@ def _r_squared(x: np.ndarray, y: np.ndarray) -> float:
         np.dot(centered, centered)
     )
     return 1.0 - ss_res / ss_tot if ss_tot else 1.0
+
+
+MAX_DROPPED_FRACTION = 0.2  # see drop_monotonicity_outliers
+
+
+def drop_monotonicity_outliers(
+    values: np.ndarray, knots: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Keep only the tick values that continue the running monotonic trend in knot
+    (pixel) order, dropping the rest.
+
+    Axis ticks are always monotonic in pixel position; a single OCR slip (e.g.
+    "1.4" misread as "14") produces a value wildly inconsistent with its
+    neighbors and would otherwise corrupt both the log/linear scale decision
+    (see is_log_scale) and the fitted scale itself.
+
+    Only a small minority of ticks are dropped this way (MAX_DROPPED_FRACTION);
+    when more than that would be discarded, the column isn't a "mostly clean,
+    one OCR slip" case this heuristic is meant for, so it is left untouched
+    rather than risk gutting a badly-misread column down to a handful of
+    coincidentally-monotonic values.
+    """
+    if len(values) < 3:
+        return values, knots
+    order = np.argsort(knots)
+    sorted_values = values[order]
+    direction = 1 if sorted_values[-1] >= sorted_values[0] else -1
+
+    keep = np.ones(len(sorted_values), dtype=bool)
+    last = sorted_values[0]
+    for i in range(1, len(sorted_values)):
+        if direction * (sorted_values[i] - last) < 0:
+            keep[i] = False
+        else:
+            last = sorted_values[i]
+
+    if np.count_nonzero(~keep) > MAX_DROPPED_FRACTION * len(sorted_values):
+        return values, knots
+
+    kept = order[keep]
+    kept.sort()
+    return values[kept], knots[kept]
 
 
 def is_log_scale(values: np.ndarray, knots: np.ndarray) -> bool:

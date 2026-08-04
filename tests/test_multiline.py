@@ -84,6 +84,29 @@ class TestFindLegendEntries(TestCase):
 
         self.assertEqual(entries, [])
 
+    def test_leading_bullet_icon_and_trailing_scale_toggle_are_stripped(self):
+        # Scenario observed on data/scrab/anet-peg.png: a dashboard legend row is
+        # "<bullet icon> ANET: PEG Ratio (1-Year Forward) 1.84 Lin v", where the
+        # bullet is OCR garbage with no alphanumeric content, and "Lin"/"v" is a
+        # scale-toggle control sharing the legend's row, past the value badge.
+        width, height = 400, 150
+        color_img = np.full((height, width, 3), 255, dtype=np.uint8)
+        texts = ["●", "ANET:", "PEG", "1.84", "Lin"]
+        bboxes = [
+            [5, 5, 11, 11],
+            [20, 5, 47, 16],
+            [51, 5, 69, 16],
+            [201, 5, 219, 16],
+            [252, 5, 275, 16],
+        ]
+        red = (30, 30, 200)
+        for box in bboxes[1:3]:
+            _paint_box(color_img, box, red)
+
+        entries = find_legend_entries(texts, bboxes, (0, 0, width, height), color_img)
+
+        self.assertEqual([e["name"] for e in entries], ["ANET: PEG"])
+
     def test_tick_label_row_is_not_mistaken_for_a_legend(self):
         width, height = 200, 150
         color_img = np.full((height, width, 3), 255, dtype=np.uint8)

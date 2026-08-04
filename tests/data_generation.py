@@ -213,18 +213,133 @@ def generate_multiline_chart(
     plt.close()
 
 
+def _quarterly_step_series(dates, start_value, volatility, avg_quarterly_return):
+    """A value that only changes once per calendar quarter, held flat between
+    revisions -- like an analyst estimate, which is what draws the step-shaped
+    lines in data/scrab/ (e.g. anet-rev.png, wm-eps.png)."""
+    quarters = pd.PeriodIndex(dates, freq="Q")
+    unique_quarters = quarters.unique().sort_values()
+    returns = np.random.normal(
+        loc=avg_quarterly_return, scale=volatility, size=len(unique_quarters)
+    )
+    quarterly_values = start_value * np.exp(np.cumsum(returns))
+    return pd.Series(quarterly_values, index=unique_quarters).reindex(quarters).values
+
+
+def generate_scrab_style_chart(
+    start_date,
+    end_date,
+    start_value=100,
+    n_step_series=2,
+    log_scale=False,
+    output_csv="simulated_scrab.csv",
+    output_image="simulated_scrab.png",
+):
+    """
+    Mimics the analyst-estimate dashboard screenshots in data/scrab/: a pale
+    lavender background, gridlines on the y-axis only, a right-hand y-axis, no
+    title, a top-left legend with a colored bullet + name + current value per
+    line, a "Log"/"Lin" scale-toggle label sharing the legend's corner, one
+    smooth "actual" line, and `n_step_series` quarterly-revised (step-shaped)
+    estimate lines above it.
+    """
+    trend = np.random.choice([-1, 1])
+    actual = simulate_time_series(
+        start_date, end_date, start_value, avg_daily_return=1e-3 * trend
+    )
+    dates = actual["date"]
+
+    palette = ["tab:red", "tab:green", "tab:purple", "tab:orange"]
+    colors = [palette[i % len(palette)] for i in range(n_step_series)]
+    # Avoid a bare trailing digit (e.g. "Estimate 1"): real dashboard names never
+    # end that way, and it can coincide in x-position with an unrelated tick
+    # label, corrupting axis-tick-group selection (see select_axis_tick_group).
+    ordinals = ["First", "Second", "Third", "Fourth"]
+    names = [f"Estimate {ordinals[i % len(ordinals)]}" for i in range(n_step_series)]
+
+    combined = actual[["date"]].copy()
+    combined["actual"] = actual["value"].values
+
+    step_values = []
+    for i in range(n_step_series):
+        level = _quarterly_step_series(
+            dates,
+            start_value * (1.3 + 0.4 * i),
+            volatility=0.03,
+            avg_quarterly_return=3e-2 * trend,
+        )
+        combined[f"estimate{i + 1}"] = level
+        step_values.append(level)
+    combined.to_csv(output_csv, index=False, sep=SEP)
+
+    # Must stay barely off-white: chart_extraction thresholds ink at gray < 250,
+    # so anything darker would have its own background mistaken for ink (see
+    # data/scrab/*.png, whose real backgrounds are gray ~251).
+    background = "#FBFAFF"
+    fig, ax = plt.subplots(figsize=(12, 6))
+    fig.patch.set_facecolor(background)
+    ax.set_facecolor(background)
+
+    all_names = ["Actual"] + names
+    all_colors = ["tab:blue"] + colors
+    all_values = [actual["value"].values] + step_values
+    for values, color, drawstyle in zip(
+        all_values, all_colors, ["default"] + ["steps-post"] * n_step_series
+    ):
+        ax.plot(dates, values, color=color, linewidth=1.2, drawstyle=drawstyle)
+
+    ax.yaxis.tick_right()
+    ax.yaxis.set_label_position("right")
+    ax.grid(axis="y", color="0.85")
+    if log_scale:
+        ax.set_yscale("log")
+        # Real dashboards label round numbers on a log axis ("17.4B", not
+        # "$2\times10^2$"), which is also what OCR can actually read -- force
+        # plain decimal labels instead of matplotlib's default scientific ones.
+        plain_formatter = FuncFormatter(lambda x, _: f"{x:.4g}")
+        ax.yaxis.set_major_formatter(plain_formatter)
+        ax.yaxis.set_minor_formatter(plain_formatter)
+    ax.set_xlabel("")
+    ax.set_ylabel("")
+
+    for i, (name, color, values) in enumerate(zip(all_names, all_colors, all_values)):
+        ax.text(
+            0.01,
+            0.97 - i * 0.045,
+            f"● {name}   {values[-1]:.2f}",
+            color=color,
+            fontsize=9,
+            transform=ax.transAxes,
+            va="top",
+        )
+    ax.text(
+        0.97,
+        0.97,
+        "Log" if log_scale else "Lin",
+        fontsize=9,
+        transform=ax.transAxes,
+        ha="right",
+        va="top",
+    )
+
+    plt.savefig(output_image, facecolor=fig.get_facecolor())
+    plt.close()
+
+
 if __name__ == "__main__":
     sample_size = 15
-    linear_path, log_path, in_area_path, multiline_path = (
+    linear_path, log_path, in_area_path, multiline_path, scrab_style_path = (
         os.path.join(TEST_DATA_DIR, "linear_scaled"),
         os.path.join(TEST_DATA_DIR, "log_scaled"),
         os.path.join(TEST_DATA_DIR, "in_area_text"),
         os.path.join(TEST_DATA_DIR, "multiline"),
+        os.path.join(TEST_DATA_DIR, "scrab_style"),
     )
     os.makedirs(linear_path, exist_ok=True)
     os.makedirs(log_path, exist_ok=True)
     os.makedirs(in_area_path, exist_ok=True)
     os.makedirs(multiline_path, exist_ok=True)
+    os.makedirs(scrab_style_path, exist_ok=True)
 
     np.random.seed(20260801)
     generate_multiline_chart(
@@ -268,4 +383,16 @@ if __name__ == "__main__":
             end_date="2025-03-31",
             output_csv=os.path.join(log_path, f"log_scaled_{i}.csv"),
             output_image=os.path.join(log_path, f"log_scaled_{i}.png"),
+        )
+
+    for i, (n_step_series, log_scale) in enumerate(
+        [(1, False), (2, True), (3, True), (2, False)]
+    ):
+        generate_scrab_style_chart(
+            start_date="2022-01-01",
+            end_date="2025-06-30",
+            n_step_series=n_step_series,
+            log_scale=log_scale,
+            output_csv=os.path.join(scrab_style_path, f"scrab_style_{i}.csv"),
+            output_image=os.path.join(scrab_style_path, f"scrab_style_{i}.png"),
         )

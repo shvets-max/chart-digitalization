@@ -3,6 +3,7 @@ import re
 from dateutil import parser
 
 YEAR_REGEX = r"19\d{2}|20[0-2]\d"
+SHORT_YEAR_REGEX = r"\d{2}"  # e.g. the "19" in "12.19"
 MONTH_REGEX = r"0?[1-9]|1[0-2]"
 DAY_REGEX = r"0?[1-9]|[12][0-9]|3[01]"
 
@@ -48,9 +49,14 @@ class DateComponentClassifier:
         # Day: 1-2 digit number 1-31
         if re.fullmatch(DAY_REGEX, s):
             return "day"
-        # Year and month: e.g. 2023-05, 05/2023, 2023.05, May 2023, 05.23, 05-23
-        if re.fullmatch(YEAR_REGEX + r"[-/.]" + MONTH_REGEX, s) or re.fullmatch(
-            MONTH_REGEX + r"[-/.]" + YEAR_REGEX, s
+        # Year and month: e.g. 2023-05, 05/2023, 2023.05, May 2023, 05.23, 05-23.
+        # Each side is parenthesized: unparenthesized "A|B[-/.]C" would bind as
+        # "A|(B[-/.]C)", silently dropping the separator+other-side requirement
+        # from the first alternative.
+        year_pattern = f"(?:{YEAR_REGEX}|{SHORT_YEAR_REGEX})"
+        month_pattern = f"(?:{MONTH_REGEX})"
+        if re.fullmatch(year_pattern + r"[-/.]" + month_pattern, s) or re.fullmatch(
+            month_pattern + r"[-/.]" + year_pattern, s
         ):
             return "year and month"
         if any(month in s.lower() for month in self.MONTHS) and re.search(

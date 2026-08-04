@@ -1,26 +1,55 @@
+import re
 from datetime import datetime
 
+import cv2
 from dateutil import parser
 from pytesseract import pytesseract
 
-from date_utils import DateComponentClassifier
+from date_utils import YEAR_REGEX, DateComponentClassifier
 
 date_component = DateComponentClassifier()
 pytesseract_config = "--oem 3 --psm 11"
+OCR_UPSCALE_FACTOR = 3  # dashboard screenshots use ~7-10px tall axis/legend text,
+# too small for tesseract to read reliably at native resolution
+MIN_NATIVE_TOKEN_SIZE = 2  # px, at native (non-upscaled) resolution; upscaling can
+# make a sub-pixel antialiasing artifact (e.g. a near-invisible legend line handle)
+# large enough for tesseract to read as a spurious tiny glyph
 
 
 def ocr(img):
+    # INTER_LINEAR, not INTER_CUBIC: cubic's overshoot/ringing at sharp glyph
+    # edges was measured to inflate tesseract's reported bounding boxes (e.g. a
+    # text row growing several pixels taller than the glyphs themselves), which
+    # then over-excludes real ink sitting just outside the true text -- linear
+    # upscaling gives the same legibility gain without that side effect.
+    upscaled = cv2.resize(
+        img,
+        None,
+        fx=OCR_UPSCALE_FACTOR,
+        fy=OCR_UPSCALE_FACTOR,
+        interpolation=cv2.INTER_LINEAR,
+    )
     data = pytesseract.image_to_data(
-        img, config=pytesseract_config, output_type=pytesseract.Output.DICT
+        upscaled, config=pytesseract_config, output_type=pytesseract.Output.DICT
     )
     words = []
     bboxes = []
     for txt, left, top, width, height in zip(
         data["text"], data["left"], data["top"], data["width"], data["height"]
     ):
-        if txt.strip():
-            words.append(txt)
-            bboxes.append([left, top, left + width, top + height])
+        if not txt.strip():
+            continue
+        box = [
+            round(v / OCR_UPSCALE_FACTOR)
+            for v in (left, top, left + width, top + height)
+        ]
+        if (
+            box[2] - box[0] < MIN_NATIVE_TOKEN_SIZE
+            or box[3] - box[1] < MIN_NATIVE_TOKEN_SIZE
+        ):
+            continue
+        words.append(txt)
+        bboxes.append(box)
     return words, bboxes
 
 
@@ -53,14 +82,24 @@ def texts_to_datetimes(texts):
     index = []
     date_components = [date_component.classify(text) for text in texts]
 
-    # Handle short format like '12.19', '12/19', '12-19' as month and year
+    # Handle short format like '12.19', '12/19', '12-19' (month, 2-digit year)
+    # as well as '2019.12', '2019/12', '2019-12' (4-digit year, month) -- the
+    # year is whichever part unambiguously matches a 4-digit year; when neither
+    # part is unambiguous (both 2-digit, e.g. "12.19") the established
+    # convention for this format is month first.
     if all(dc == "year and month" for dc in date_components):
         sep = next((s for s in [".", "/", "-"] if s in texts[0]), None)
         for t in texts:
-            m, y = t.split(sep)
-            year = int(y)
+            a, b = t.split(sep)
+            if re.fullmatch(YEAR_REGEX, a):
+                year_str, month_str = a, b
+            elif re.fullmatch(YEAR_REGEX, b):
+                year_str, month_str = b, a
+            else:
+                month_str, year_str = a, b
+            year = int(year_str)
             year += 2000 if year < 100 else 0
-            index.append(datetime(year, int(m), 1))
+            index.append(datetime(year, int(month_str), 1))
         return index
 
     # Handle alternating month and day with years (e.g. ['Dec', '12', '2025', ...])
