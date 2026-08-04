@@ -189,13 +189,32 @@ def find_legend_entries(texts, bboxes, chart_area, color_img):
         top = row_bbox[1]
 
         row_texts = [texts[i] for i in id_group]
+
+        # Drop a leading legend bullet/marker icon: dashboard legends draw a small
+        # colored dot before the name, which OCR reads as garbage with no
+        # alphanumeric content.
+        while row_texts and not any(ch.isalnum() for ch in row_texts[0]):
+            row_texts, box_group = row_texts[1:], box_group[1:]
+        if not row_texts:
+            continue
+
         numeric_flags = [_is_numeric_token(t) for t in row_texts]
         if sum(numeric_flags) > 0.5 * len(row_texts):
             continue  # looks like a tick-label row, not a legend
 
+        # Drop the trailing current-value badge (e.g. "2.16B") and anything after
+        # it in the row: a "Lin"/"Log" scale-toggle control can share the
+        # legend's top row and would otherwise be read as part of the name.
         name_texts, name_boxes = list(row_texts), list(box_group)
-        if numeric_flags[-1]:  # trailing value badge, e.g. "2.16B"
-            name_texts, name_boxes = name_texts[:-1], name_boxes[:-1]
+        last_numeric = next(
+            (i for i in range(len(numeric_flags) - 1, -1, -1) if numeric_flags[i]),
+            None,
+        )
+        if last_numeric is not None:
+            name_texts, name_boxes = (
+                name_texts[:last_numeric],
+                name_boxes[:last_numeric],
+            )
         if not name_texts:
             continue
         name = " ".join(name_texts).strip()

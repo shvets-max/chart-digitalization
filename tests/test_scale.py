@@ -3,7 +3,7 @@ from unittest import TestCase
 import numpy as np
 
 from function import Linear, Logarithmic
-from scale import create_y_scale, is_log_scale
+from scale import create_y_scale, drop_monotonicity_outliers, is_log_scale
 
 
 class TestIsLogScale(TestCase):
@@ -63,3 +63,43 @@ class TestCreateYScale(TestCase):
     def test_mismatched_lengths_raise(self):
         with self.assertRaises(ValueError):
             create_y_scale([1.0, 2.0], np.array([0.0]))
+
+
+class TestDropMonotonicityOutliers(TestCase):
+    def test_single_ocr_slip_is_dropped(self):
+        # "1.4" misread as "14" (missing decimal point), a real failure seen on
+        # data/scrab/anet-peg.png that flipped its log/linear scale decision.
+        values = np.array([3.8, 3.6, 3.4, 3.2, 2.8, 2.6, 2.2, 1.6, 14.0, 0.8, 0.6])
+        knots = np.array(
+            [40, 81, 121, 162, 243, 284, 365, 486, 526, 648, 689], dtype=float
+        )
+        kept_values, kept_knots = drop_monotonicity_outliers(values, knots)
+        self.assertNotIn(14.0, kept_values)
+        self.assertEqual(len(kept_values), len(values) - 1)
+        self.assertEqual(len(kept_values), len(kept_knots))
+
+    def test_clean_monotonic_ticks_are_untouched(self):
+        values = np.array([100.0, 200.0, 300.0, 400.0, 500.0])
+        knots = np.array([0.0, 10.0, 20.0, 30.0, 40.0])
+        kept_values, kept_knots = drop_monotonicity_outliers(values, knots)
+        np.testing.assert_array_equal(kept_values, values)
+        np.testing.assert_array_equal(kept_knots, knots)
+
+    def test_majority_corrupted_column_is_left_untouched(self):
+        """
+        When most values disagree with the trend (a systemically misread column,
+        not a single OCR slip), dropping down to a small monotonic remainder
+        would do more harm than good, so nothing is dropped.
+        """
+        values = np.array([29.0, 26.0, 23.0, 21.0, 19.0, 15.5e9, 12.8e9, 10.4e9])
+        knots = np.arange(len(values), dtype=float)
+        kept_values, kept_knots = drop_monotonicity_outliers(values, knots)
+        np.testing.assert_array_equal(kept_values, values)
+        np.testing.assert_array_equal(kept_knots, knots)
+
+    def test_fewer_than_three_values_are_untouched(self):
+        values = np.array([1.0, 2.0])
+        knots = np.array([0.0, 10.0])
+        kept_values, kept_knots = drop_monotonicity_outliers(values, knots)
+        np.testing.assert_array_equal(kept_values, values)
+        np.testing.assert_array_equal(kept_knots, knots)

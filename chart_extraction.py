@@ -10,7 +10,13 @@ from function import FunctionBase, Logarithmic
 from geometry import cluster_data, cut_chart_area, get_column_bboxes, get_row_bboxes
 from multiline import cluster_ink_colors, find_legend_entries, match_series_to_legend
 from ocr_utils import ocr, texts_to_datetimes, texts_to_numbers
-from scale import create_x_scale, create_y_scale, log_ticks, nice_ticks
+from scale import (
+    create_x_scale,
+    create_y_scale,
+    drop_monotonicity_outliers,
+    log_ticks,
+    nice_ticks,
+)
 
 
 def select_axis_tick_group(ids, texts, parser):
@@ -261,6 +267,9 @@ def extract_chart(image_path) -> ChartExtraction:
     y_knots = adjust_knots_to_grid(y_knots, grid_y_component_clusters_centers)
     x_knots = adjust_knots_to_grid(x_knots, grid_x_component_clusters_centers)
 
+    column_numbers, y_knots = drop_monotonicity_outliers(
+        np.array(column_numbers, dtype=float), y_knots
+    )
     y_scale = create_y_scale(column_numbers, y_knots)
     x_scale = create_x_scale(row_index, x_knots)
 
@@ -363,9 +372,12 @@ def column_candidate_rows(
     chart_area, grid_y_component_map, rows_kept, grid_x_lookup, allowed_margin
 ):
     """
-    Candidate series rows per chart-area column: the mean row of each ink cluster.
-    Columns on a vertical grid line, or with no ink, get an empty list. More than
-    one candidate means something other than the series is drawn in that column.
+    Candidate series rows per chart-area column: (mean, min, max) of each ink
+    cluster's rows. Columns on a vertical grid line, or with no ink, get an empty
+    list. More than one candidate means something other than the series is drawn
+    in that column. The min/max span is kept alongside the mean so a genuine
+    vertical step-transition (one tall, contiguous run of ink) can be told apart
+    from an isolated, unrelated blob that merely happens to average out nearby.
     """
     candidates = []
     for x in range(chart_area.shape[1]):
@@ -377,7 +389,10 @@ def column_candidate_rows(
             candidates.append([])
             continue
         candidates.append(
-            [float(np.mean(cluster)) for cluster in cluster_data(ys, allowed_margin)]
+            [
+                (float(np.mean(cluster)), float(min(cluster)), float(max(cluster)))
+                for cluster in cluster_data(ys, allowed_margin)
+            ]
         )
     return candidates
 
@@ -404,25 +419,32 @@ def resolve_series_rows(candidates, max_step: float) -> list[Optional[float]]:
     it, each column keeping the candidate closest to the last accepted row. Starting
     from the left instead would let a legend drawn before the series begins capture
     the whole traversal. Candidates further than `max_step` from the running row are
-    treated as foreign ink and yield None.
+    treated as foreign ink and yield None -- unless the candidate's own ink span
+    reaches back to the running row: a step-shaped series (e.g. an analyst estimate
+    revised once a quarter) draws its jump as one tall, unbroken vertical run whose
+    span covers every row between the old and new level, so the running row falls
+    inside it even though the cluster's mean is far away. An isolated, unrelated
+    blob (a stray marker, anti-aliasing debris) has no such connecting span and is
+    still rejected.
     """
     resolved: list[Optional[float]] = [None] * len(candidates)
     seed = _longest_unambiguous_run(candidates)
     if seed is None:
         # Every column is ambiguous, so there is no series to lock on to.
-        return [rows[0] if len(rows) == 1 else None for rows in candidates]
+        return [rows[0][0] if len(rows) == 1 else None for rows in candidates]
 
-    resolved[seed] = candidates[seed][0]
+    resolved[seed] = candidates[seed][0][0]
     for indices in (range(seed + 1, len(candidates)), range(seed - 1, -1, -1)):
         last = resolved[seed]
         for i in indices:
             rows = candidates[i]
             if not rows:
                 continue
-            closest = min(rows, key=lambda row: abs(row - last))
-            if abs(closest - last) <= max_step:
-                resolved[i] = closest
-                last = closest
+            closest = min(rows, key=lambda row: abs(row[0] - last))
+            mean = closest[0]
+            if len(rows) == 1 or abs(mean - last) <= max_step:
+                resolved[i] = mean
+                last = mean
     return resolved
 
 
@@ -432,7 +454,7 @@ def estimate_max_step(candidates, height: int) -> float:
     series actually moves where it is unambiguous. Keeps the interference cut-off
     adaptive instead of a fixed pixel budget.
     """
-    unambiguous = [rows[0] if len(rows) == 1 else None for rows in candidates]
+    unambiguous = [rows[0][0] if len(rows) == 1 else None for rows in candidates]
     steps = [
         abs(b - a)
         for a, b in zip(unambiguous, unambiguous[1:])

@@ -144,6 +144,19 @@ texts_to_datetimes_data = [
             datetime(2022, 9, 1),
         ],
     ),
+    (
+        # Year-first, 4-digit-year short format (matplotlib's default date tick
+        # label, e.g. tests/data/scrab_style/): the year is not always the
+        # second part of the pair.
+        ["2022-01", "2022-07", "2023-01", "2023-07", "2024-01"],
+        [
+            datetime(2022, 1, 1),
+            datetime(2022, 7, 1),
+            datetime(2023, 1, 1),
+            datetime(2023, 7, 1),
+            datetime(2024, 1, 1),
+        ],
+    ),
 ]
 
 date_component_classify_data = [

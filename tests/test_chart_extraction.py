@@ -23,6 +23,7 @@ LINEAR_SCALE_DIR = os.path.join(TEST_DATA_DIR, "linear_scaled")
 LOG_SCALE_DIR = os.path.join(TEST_DATA_DIR, "log_scaled")
 IN_AREA_TEXT_DIR = os.path.join(TEST_DATA_DIR, "in_area_text")
 MULTILINE_DIR = os.path.join(TEST_DATA_DIR, "multiline")
+SCRAB_STYLE_DIR = os.path.join(TEST_DATA_DIR, "scrab_style")
 REPO_ROOT = os.path.dirname(os.path.dirname(__file__))
 REAL_MULTILINE_DIR = os.path.join(REPO_ROOT, "data", "multiline")
 
@@ -180,6 +181,35 @@ class TestChartAreaInterference(TestCase):
         for description, ascii_rows, expected in extract_series_interference_data:
             with self.subTest(case=description):
                 self.assertEqual(_read_ascii_chart(ascii_rows), expected, description)
+
+
+class TestStepShapedSeries(TestCase):
+    """
+    A step-shaped series (e.g. an analyst estimate revised once a quarter, as in
+    data/scrab/anet-rev.png) draws its jump as one tall, unbroken vertical run in
+    a single column -- a legitimate large row delta, not foreign ink.
+    """
+
+    def test_large_vertical_jump_is_followed(self):
+        width, jump_col, low_row, high_row = 10, 4, 2, 15
+        ascii_rows = []
+        for row in range(20):
+            cells = [" "] * width
+            if row == low_row:
+                for col in range(jump_col):
+                    cells[col] = "#"
+            if low_row <= row <= high_row:
+                cells[jump_col] = "#"
+            if row == high_row:
+                for col in range(jump_col + 1, width):
+                    cells[col] = "#"
+            ascii_rows.append("".join(cells))
+
+        result = _read_ascii_chart(ascii_rows)
+        self.assertEqual(result[:jump_col], [float(low_row)] * jump_col)
+        self.assertEqual(
+            result[jump_col + 1 :], [float(high_row)] * (width - jump_col - 1)
+        )
 
 
 class TestInAreaTextExtraction(TestCase):
@@ -436,3 +466,93 @@ class TestMultilineExtraction(TestCase):
                 "NOW: Price Target Low",
             },
         )
+
+
+class TestScrabStyleExtraction(TestCase):
+    """
+    End-to-end extraction of the dashboard style in data/scrab/: pale
+    off-white background, right-hand y-axis, no title, a colored bullet+name+
+    value legend, and step-shaped (quarterly-revised estimate) lines alongside
+    a smooth "actual" line -- see tests/data_generation.generate_scrab_style_chart.
+
+    Real data/scrab/*.png screenshots have no ground-truth CSV and their tiny
+    axis text pushes OCR to its limits (see docs/fixes.txt), so this exercises
+    the same visual design against synthetic charts with known values instead:
+    it is deliberately lenient (series count and coverage, not tight value
+    accuracy) since the point is catching pipeline regressions on this chart
+    shape, not measuring OCR legibility.
+    """
+
+    MAX_MEAN_REL_ERROR = 0.2
+    MIN_RESOLVED_FRACTION = 0.6
+
+    def test_step_and_actual_series_are_recovered(self):
+        expected_results = _load_expected_results(SCRAB_STYLE_DIR)
+        self.assertTrue(expected_results, f"no fixtures in {SCRAB_STYLE_DIR}")
+
+        for idx, expected in expected_results.items():
+            with self.subTest(chart=idx):
+                image_path = os.path.join(SCRAB_STYLE_DIR, f"{idx}.png")
+                extraction = extract_chart(image_path)
+                n_expected = len(next(iter(expected.values())))
+                n_extracted = (
+                    len(extraction.time_series[0][1]) if extraction.time_series else 0
+                )
+                self.assertEqual(
+                    n_extracted, n_expected, f"series count mismatch for {idx}"
+                )
+
+                extracted_by_date = {
+                    dt.date(): values for dt, values in extraction.time_series
+                }
+                for series_idx in range(n_expected):
+                    resolved = [
+                        values[series_idx]
+                        for values in extracted_by_date.values()
+                        if values[series_idx] is not None
+                    ]
+                    resolved_fraction = len(resolved) / len(extracted_by_date)
+                    self.assertGreater(
+                        resolved_fraction,
+                        self.MIN_RESOLVED_FRACTION,
+                        f"{idx} series {series_idx} resolved too few columns",
+                    )
+
+                expected_by_col = [
+                    {d: v[i] for d, v in expected.items()} for i in range(n_expected)
+                ]
+                used_series = set()
+                for col_idx, expected_col in enumerate(expected_by_col):
+                    best_idx, best_error = None, None
+                    for series_idx in range(n_expected):
+                        got_col = {
+                            d: values[series_idx]
+                            for d, values in extracted_by_date.items()
+                        }
+                        common = [d for d in expected_col if got_col.get(d) is not None]
+                        if not common:
+                            continue
+                        error = float(
+                            np.mean(
+                                [
+                                    abs(got_col[d] - expected_col[d]) / expected_col[d]
+                                    for d in common
+                                ]
+                            )
+                        )
+                        if best_error is None or error < best_error:
+                            best_idx, best_error = series_idx, error
+                    self.assertIsNotNone(
+                        best_idx, f"{idx}: no series matched csv column {col_idx}"
+                    )
+                    self.assertNotIn(
+                        best_idx,
+                        used_series,
+                        f"{idx}: csv column {col_idx} matched an already-claimed series",
+                    )
+                    used_series.add(best_idx)
+                    self.assertLess(
+                        best_error,
+                        self.MAX_MEAN_REL_ERROR,
+                        f"{idx}: closest matching series for column {col_idx} is still far off",
+                    )
