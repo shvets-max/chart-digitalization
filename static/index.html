@@ -34,15 +34,29 @@
           <p class="result-file" id="result-file"></p>
         </div>
         <div class="badges" id="badges"></div>
+        <div class="header-actions">
+          <button type="button" class="button" id="fullscreen-toggle">Full screen</button>
+        </div>
       </div>
 
       <div class="result-body">
         <div class="canvas-wrap" id="canvas-wrap">
           <canvas id="overlay-canvas"></canvas>
           <div class="tooltip" id="tooltip" hidden></div>
+          <div class="zoom-controls" aria-label="Zoom">
+            <button type="button" class="zoom-button" id="zoom-out" aria-label="Zoom out">&minus;</button>
+            <output class="zoom-level" id="zoom-level">100%</output>
+            <button type="button" class="zoom-button" id="zoom-in" aria-label="Zoom in">+</button>
+            <button type="button" class="zoom-button zoom-reset" id="zoom-reset" aria-label="Reset zoom">Reset</button>
+          </div>
         </div>
 
         <aside class="controls" aria-label="Overlay options">
+          <fieldset class="control-group">
+            <legend>Series</legend>
+            <div class="series-toggles" id="series-toggles" role="group" aria-label="Toggle series visibility"></div>
+          </fieldset>
+
           <fieldset class="control-group">
             <legend>Overlay</legend>
             <label class="check">
