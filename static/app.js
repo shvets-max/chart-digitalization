@@ -10,12 +10,21 @@ const SERIES_SLOTS = [
 // so the default starts at the orange slot to stay distinguishable from it.
 const DEFAULT_SLOT = 1;
 
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 8;
+
 const state = {
   chart: null,
   image: null,
   ticks: { x: [], y: [] },
   colorSlot: DEFAULT_SLOT,
   hoverIndex: null,
+  hiddenSeries: new Set(),
+  zoom: { scale: 1, tx: 0, ty: 0 },
+  viewScale: 1,
+  lastView: { width: 0, height: 0 },
+  isPanning: false,
+  panPointerId: null,
 };
 
 const el = (id) => document.getElementById(id);
@@ -76,11 +85,14 @@ async function showChart(chart) {
   state.chart = chart;
   state.image = await loadImage(chart.image.url);
   state.hoverIndex = null;
+  state.hiddenSeries = new Set();
+  resetZoom();
 
   el("result-panel").hidden = false;
   el("result-file").textContent = chart.filename;
   el("download-csv").href = `/api/charts/${chart.id}/series.csv`;
   renderBadges(chart);
+  renderSeriesToggles(chart);
   renderTable(chart);
   el("scale-hint").textContent = chart.axes.y_is_log
     ? "Values read off a logarithmic y-axis."
@@ -103,6 +115,31 @@ function renderBadges(chart) {
   el("badges").innerHTML = badges
     .map((text) => `<span class="badge">${text}</span>`)
     .join("");
+}
+
+/* One toggle chip per extracted series; click hides/shows its line, markers and tooltip row. */
+function renderSeriesToggles(chart) {
+  const container = el("series-toggles");
+  container.innerHTML = chart.series
+    .map(
+      (series, index) => `<button type="button" class="series-toggle" role="switch"
+        data-index="${index}" aria-pressed="true" style="--dot: ${seriesColor(index)}">
+        <span class="dot"></span>
+        <span class="name">${series.name || `Series ${index + 1}`}</span>
+      </button>`,
+    )
+    .join("");
+
+  container.addEventListener("click", (event) => {
+    const button = event.target.closest(".series-toggle");
+    if (!button) return;
+    const index = Number(button.dataset.index);
+    const pressed = button.getAttribute("aria-pressed") === "true";
+    button.setAttribute("aria-pressed", String(!pressed));
+    if (pressed) state.hiddenSeries.add(index);
+    else state.hiddenSeries.delete(index);
+    render();
+  });
 }
 
 function formatNumber(value) {
@@ -143,17 +180,33 @@ function render() {
   if (!state.chart || !state.image) return;
 
   const image = state.image;
-  const cssWidth = el("canvas-wrap").clientWidth;
+  const wrap = el("canvas-wrap");
+  const fullscreen = el("result-panel").classList.contains("is-fullscreen");
+  const naturalRatio = image.naturalHeight / image.naturalWidth;
+
+  // Fullscreen fits the image inside the available box (letterboxed); otherwise it's width-driven.
+  let cssWidth = wrap.clientWidth;
+  let cssHeight = cssWidth * naturalRatio;
+  if (fullscreen && wrap.clientHeight > 0 && cssHeight > wrap.clientHeight) {
+    cssHeight = wrap.clientHeight;
+    cssWidth = cssHeight / naturalRatio;
+  }
+
   const scale = cssWidth / image.naturalWidth;
-  const cssHeight = image.naturalHeight * scale;
   const ratio = window.devicePixelRatio || 1;
 
   canvas.width = Math.round(cssWidth * ratio);
   canvas.height = Math.round(cssHeight * ratio);
   canvas.style.width = `${cssWidth}px`;
   canvas.style.height = `${cssHeight}px`;
+
+  state.viewScale = scale;
+  state.lastView = { width: cssWidth, height: cssHeight };
+
+  const zoom = state.zoom;
   ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
   ctx.clearRect(0, 0, cssWidth, cssHeight);
+  ctx.setTransform(ratio * zoom.scale, 0, 0, ratio * zoom.scale, ratio * zoom.tx, ratio * zoom.ty);
   ctx.drawImage(image, 0, 0, cssWidth, cssHeight);
 
   const view = {
@@ -276,6 +329,7 @@ function drawSeries(view) {
   ctx.lineCap = "round";
 
   state.chart.series.forEach((series, index) => {
+    if (state.hiddenSeries.has(index)) return;
     // A surface-coloured halo under the stroke keeps it legible on busy images.
     for (const pass of [
       { color: cssVar("--surface-1"), width: 4.5, alpha: 0.65 },
@@ -324,6 +378,7 @@ function drawHoverMarker(view) {
   ctx.setLineDash([]);
 
   state.chart.series.forEach((series, seriesIndex) => {
+    if (state.hiddenSeries.has(seriesIndex)) return;
     const point = series.points[index];
     if (!point || point.y_pixel === null) return;
     const y = view.y(point.y_pixel);
@@ -337,12 +392,99 @@ function drawHoverMarker(view) {
   });
 }
 
+/* ------------------------------------------------------------------- zoom */
+
+// Keeps the zoomed image from being panned past its edges into empty canvas.
+function clampZoom(scale, tx, ty) {
+  const { width, height } = state.lastView;
+  if (scale <= 1) return { scale: 1, tx: 0, ty: 0 };
+  const minTx = width - width * scale;
+  const minTy = height - height * scale;
+  return {
+    scale,
+    tx: Math.min(0, Math.max(minTx, tx)),
+    ty: Math.min(0, Math.max(minTy, ty)),
+  };
+}
+
+function updateZoomUI() {
+  el("zoom-level").textContent = `${Math.round(state.zoom.scale * 100)}%`;
+  canvas.classList.toggle("is-zoomed", state.zoom.scale > 1);
+}
+
+function zoomAt(rectX, rectY, factor) {
+  const zoom = state.zoom;
+  const newScale = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom.scale * factor));
+  if (newScale === zoom.scale) return;
+  const userX = (rectX - zoom.tx) / zoom.scale;
+  const userY = (rectY - zoom.ty) / zoom.scale;
+  const newTx = rectX - newScale * userX;
+  const newTy = rectY - newScale * userY;
+  state.zoom = clampZoom(newScale, newTx, newTy);
+  updateZoomUI();
+  render();
+}
+
+function resetZoom() {
+  state.zoom = { scale: 1, tx: 0, ty: 0 };
+  updateZoomUI();
+}
+
+function handleWheelZoom(event) {
+  if (!state.chart) return;
+  event.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  const factor = event.deltaY < 0 ? 1.15 : 1 / 1.15;
+  zoomAt(event.clientX - rect.left, event.clientY - rect.top, factor);
+}
+
+function startPan(event) {
+  if (state.zoom.scale <= 1) return;
+  state.isPanning = true;
+  state.panPointerId = event.pointerId;
+  state.panStart = { x: event.clientX, y: event.clientY, ...state.zoom };
+  canvas.setPointerCapture(event.pointerId);
+  canvas.classList.add("is-panning");
+  handlePointerLeave();
+}
+
+function panTo(event) {
+  const start = state.panStart;
+  const dx = event.clientX - start.x;
+  const dy = event.clientY - start.y;
+  state.zoom = clampZoom(start.scale, start.tx + dx, start.ty + dy);
+  render();
+}
+
+function endPan(event) {
+  if (!state.isPanning) return;
+  state.isPanning = false;
+  canvas.classList.remove("is-panning");
+  if (state.panPointerId !== null) canvas.releasePointerCapture(state.panPointerId);
+  state.panPointerId = null;
+}
+
+/* ------------------------------------------------------------- full screen */
+
+function setFullscreen(on) {
+  el("result-panel").classList.toggle("is-fullscreen", on);
+  el("fullscreen-toggle").textContent = on ? "Exit full screen" : "Full screen";
+  render();
+}
+
+function toggleFullscreen() {
+  setFullscreen(!el("result-panel").classList.contains("is-fullscreen"));
+}
+
 /* ------------------------------------------------------------------ hover */
 
 function pointIndexAt(clientX) {
   const points = state.chart.series[0].points;
   const rect = canvas.getBoundingClientRect();
-  const imageX = ((clientX - rect.left) / rect.width) * state.image.naturalWidth;
+  const rectX = clientX - rect.left;
+  const zoom = state.zoom;
+  const userX = (rectX - zoom.tx) / zoom.scale;
+  const imageX = userX / state.viewScale;
   const index = Math.round(imageX - points[0].x_pixel);
   return index >= 0 && index < points.length ? index : null;
 }
@@ -351,6 +493,7 @@ function showTooltip(index, clientX) {
   const tooltip = el("tooltip");
   const rows = state.chart.series
     .map((series, seriesIndex) => {
+      if (state.hiddenSeries.has(seriesIndex)) return "";
       const point = series.points[index];
       const value = point ? point.y_value : null;
       const label = state.chart.series.length > 1 ? `${series.name}: ` : "";
@@ -373,6 +516,7 @@ function showTooltip(index, clientX) {
 
 function handlePointerMove(event) {
   if (!state.chart) return;
+  if (state.isPanning) return panTo(event);
   const index = pointIndexAt(event.clientX);
   if (index === null) return handlePointerLeave();
   state.hoverIndex = index;
@@ -487,8 +631,37 @@ function bindControls() {
 
   canvas.addEventListener("pointermove", handlePointerMove);
   canvas.addEventListener("pointerleave", handlePointerLeave);
+  canvas.addEventListener("pointerdown", startPan);
+  canvas.addEventListener("pointerup", endPan);
+  canvas.addEventListener("pointercancel", endPan);
+  canvas.addEventListener("wheel", handleWheelZoom, { passive: false });
+  canvas.addEventListener("dblclick", resetZoomAndRender);
   window.addEventListener("resize", render);
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", render);
+
+  el("zoom-in").addEventListener("click", () => {
+    if (!state.chart) return;
+    const { width, height } = state.lastView;
+    zoomAt(width / 2, height / 2, 1.4);
+  });
+  el("zoom-out").addEventListener("click", () => {
+    if (!state.chart) return;
+    const { width, height } = state.lastView;
+    zoomAt(width / 2, height / 2, 1 / 1.4);
+  });
+  el("zoom-reset").addEventListener("click", resetZoomAndRender);
+
+  el("fullscreen-toggle").addEventListener("click", toggleFullscreen);
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && el("result-panel").classList.contains("is-fullscreen")) {
+      setFullscreen(false);
+    }
+  });
+}
+
+function resetZoomAndRender() {
+  resetZoom();
+  render();
 }
 
 buildSwatches();

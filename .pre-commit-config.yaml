@@ -8,30 +8,18 @@ repos:
       - id: check-added-large-files
         args: ['--maxkb=1024']
 
-  - repo: https://github.com/PyCQA/isort
-    rev: 5.13.2
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
     hooks:
-      - id: isort
-        name: isort (python)
-
-  - repo: https://github.com/psf/black
-    rev: 24.2.0
-    hooks:
-      - id: black
-        language_version: python3.11
-
-  - repo: https://github.com/PyCQA/flake8
-    rev: 7.0.0
-    hooks:
-      - id: flake8
-        language_version: python3.11
-        args: ["--max-line-length=88", "--ignore=E203"]
+      - id: ruff
+        args: ["--fix"]
+      - id: ruff-format
 
   - repo: local
     hooks:
     - id: unittest
       name: unittest
-      entry: python -m unittest discover
+      entry: python -m unittest discover -s tests
       language: system # Use current Python environment
       always_run: true
       pass_filenames: false
