@@ -24,6 +24,7 @@ LOG_SCALE_DIR = os.path.join(TEST_DATA_DIR, "log_scaled")
 IN_AREA_TEXT_DIR = os.path.join(TEST_DATA_DIR, "in_area_text")
 MULTILINE_DIR = os.path.join(TEST_DATA_DIR, "multiline")
 SCRAB_STYLE_DIR = os.path.join(TEST_DATA_DIR, "scrab_style")
+DENSE_CROSSING_DIR = os.path.join(TEST_DATA_DIR, "dense_crossing")
 REPO_ROOT = os.path.dirname(os.path.dirname(__file__))
 REAL_MULTILINE_DIR = os.path.join(REPO_ROOT, "data", "multiline")
 
@@ -164,11 +165,42 @@ def _read_ascii_chart(ascii_rows: list[str]) -> list[Optional[float]]:
         y_scale=Linear(knots=[0, height - 1], values=[0, height - 1]),
         grid_x_component=np.array([], dtype=int),
         grid_y_component_map=np.zeros(height, dtype=bool),
-        grid_l=0,
         x_offset=0,
         y_offset=0,
     )
     return [None if v[0] is None else round(v[0], 1) for _, v in time_series]
+
+
+class TestExtractTimeSeriesFromChartArea(TestCase):
+    """
+    Regression test for a real x-axis mislabeling bug: extract_chart used to
+    compute each point's x-value from `local_column + x_offset - grid_l`, where
+    `grid_l` (from geometry.cut_chart_area) was meant to correct for how far the
+    chart area's left edge sits from image column 0, but actually came out equal
+    to `x_offset` whenever cut_chart_area trimmed no further than its own
+    axis-bbox pass -- silently cancelling `x_offset` out and feeding the scale a
+    raw LOCAL column instead of the point's true ABSOLUTE image position. Every
+    tick position used to fit `x_scale` is read in absolute image coordinates
+    (see extract_chart), so a local column's value must come from its absolute
+    position, `local_column + x_offset` -- nothing else.
+    """
+
+    def test_x_value_uses_absolute_column_not_local_index(self):
+        chart_area = np.array([[1], [0]], dtype=np.uint8)  # single column, ink at row 0
+        x_offset = 500  # far from image column 0, unlike the local column index (0)
+        x_scale = Linear(knots=[0, 1000], values=[0, 1000])
+
+        time_series = extract_time_series_from_chart_area(
+            chart_area,
+            x_scale=x_scale,
+            y_scale=Linear(knots=[0, 1], values=[0, 1]),
+            grid_x_component=np.array([], dtype=int),
+            grid_y_component_map=np.zeros(2, dtype=bool),
+            x_offset=x_offset,
+            y_offset=0,
+        )
+
+        self.assertEqual(time_series[0][0], x_scale(x_offset))
 
 
 class TestChartAreaInterference(TestCase):
@@ -342,6 +374,74 @@ class TestSelectSeriesClusters(TestCase):
         )
 
         self.assertEqual(len(groups), 2)
+
+    @staticmethod
+    def _mask_at_columns(height, width, columns, row):
+        mask = np.zeros((height, width), dtype=bool)
+        mask[row, list(columns)] = True
+        return mask
+
+    def test_shades_each_below_threshold_still_merge_into_one_series(self):
+        # Dense line crossings can split one physical line's ink into shades that
+        # each resolve on a different, largely disjoint subset of columns
+        # (whichever shade happens to win that segment) -- so neither alone
+        # clears the default 50% resolved-fraction bar, yet together they cover
+        # most of the width and clearly trace the SAME line (rows agree by
+        # construction: both are read off the same diagonal here).
+        height, width = 130, 120
+        shared = set(range(0, width, 3))  # ~40 cols, spread across the full width
+        a_only = set(range(1, 55, 3))  # ~18 cols, left half only
+        b_only = set(range(65, 119, 3))  # ~18 cols, right half only
+        a_cols, b_cols = shared | a_only, shared | b_only
+        self.assertLess(len(a_cols), 0.5 * width, "test setup: a must fail alone")
+        self.assertLess(len(b_cols), 0.5 * width, "test setup: b must fail alone")
+        self.assertGreaterEqual(
+            len(a_cols | b_cols), 0.5 * width, "test setup: union must clear the bar"
+        )
+
+        mask_a = self._mask_at_columns(height, width, a_cols, row=20)
+        mask_b = self._mask_at_columns(height, width, b_cols, row=21)
+        ink_clusters = [
+            {"color": (142, 134, 38), "mask": mask_a, "count": int(mask_a.sum())},
+            {"color": (124, 116, 6), "mask": mask_b, "count": int(mask_b.sum())},
+        ]
+        grid_y_component_map = np.zeros(height, dtype=bool)
+        grid_x_component = np.array([], dtype=int)
+
+        groups = select_series_clusters(
+            ink_clusters, grid_y_component_map, grid_x_component, y_offset=0
+        )
+
+        self.assertEqual(len(groups), 1, "the two shades should merge into one line")
+        self.assertEqual(groups[0]["resolved_count"], len(a_cols | b_cols))
+
+    def test_narrow_crossing_overlap_does_not_merge_distinct_lines(self):
+        # Two genuinely different lines that only happen to sit close together
+        # while briefly crossing must NOT be merged just because that crossing
+        # gave them enough overlapping, closely-matching columns to otherwise
+        # pass: unlike a split shade's overlap (scattered across the whole
+        # trajectory), a real crossing's shared columns cluster in one narrow
+        # stretch, which is exactly what should disqualify it.
+        height, width = 130, 120
+        mask_a = self._mask_at_columns(height, width, range(0, 100), row=20)
+        mask_b = self._mask_at_columns(height, width, range(80, 120), row=21)
+        ink_clusters = [
+            {"color": (0, 0, 200), "mask": mask_a, "count": int(mask_a.sum())},
+            {"color": (0, 200, 0), "mask": mask_b, "count": int(mask_b.sum())},
+        ]
+        grid_y_component_map = np.zeros(height, dtype=bool)
+        grid_x_component = np.array([], dtype=int)
+
+        groups = select_series_clusters(
+            ink_clusters, grid_y_component_map, grid_x_component, y_offset=0
+        )
+
+        self.assertEqual(len(groups), 1, "only cluster a clears the bar on its own")
+        self.assertEqual(
+            groups[0]["resolved_count"],
+            100,
+            "cluster b's unrelated tail must not have been merged in",
+        )
 
 
 class TestMultilineExtraction(TestCase):
@@ -555,4 +655,105 @@ class TestScrabStyleExtraction(TestCase):
                         best_error,
                         self.MAX_MEAN_REL_ERROR,
                         f"{idx}: closest matching series for column {col_idx} is still far off",
+                    )
+
+
+class TestDenseCrossingExtraction(TestCase):
+    """
+    End-to-end extraction of the scrab_style shape with `dense_crossing=True` --
+    a noisy "actual" line pinned to the SAME level as its step lines, so it
+    crosses every one of them over and over across the whole date range, unlike
+    the default scrab_style fixtures where the steps sit comfortably above the
+    actual line and barely touch it. This is the shape of the real screenshots
+    that motivated it (data/scrab/nvo-pt.png, avgo-pt.png, panw-pt.png) and is
+    what exposed two real bugs:
+
+    - chart_extraction.extract_chart's x-axis pixel-to-value formula silently
+      dropped the chart area's own left-edge offset whenever geometry.cut_chart_area
+      happened to trim no further than it (see the now-removed grid_l), mislabeling
+      every point with the wrong date -- invisible on a slow-moving line (nearby
+      dates have similar values) but glaring on a fast-moving one.
+    - chart_extraction.select_series_clusters gated a color cluster's eligibility
+      on its OWN resolved-column coverage before ever trying to merge it with
+      others, so a line whose anti-aliasing got split into shades by all those
+      crossings (each shade individually under the bar) lost whichever columns
+      the other shade would have covered, instead of the two reuniting into one
+      fully-covered series (see _is_same_trajectory).
+
+    Unlike TestScrabStyleExtraction this does not require the extracted series
+    count to equal the CSV's: an occasional un-merged duplicate shade of a line
+    is a known, milder residual (it still resolves correctly, just twice) and
+    asserting exact counts here would make this test flaky for the wrong reason.
+    What matters is that every true column is recovered accurately and with high
+    coverage SOMEWHERE among the extracted series.
+    """
+
+    MAX_MEAN_REL_ERROR = 0.05
+    MIN_RESOLVED_FRACTION = 0.6
+
+    def test_every_line_is_recovered_despite_dense_crossings(self):
+        expected_results = _load_expected_results(DENSE_CROSSING_DIR)
+        self.assertTrue(expected_results, f"no fixtures in {DENSE_CROSSING_DIR}")
+
+        for idx, expected in expected_results.items():
+            with self.subTest(chart=idx):
+                image_path = os.path.join(DENSE_CROSSING_DIR, f"{idx}.png")
+                extraction = extract_chart(image_path)
+                n_expected = len(next(iter(expected.values())))
+                n_extracted = (
+                    len(extraction.time_series[0][1]) if extraction.time_series else 0
+                )
+                self.assertGreaterEqual(
+                    n_extracted,
+                    n_expected,
+                    f"{idx}: fewer series extracted than are in the chart",
+                )
+
+                extracted_by_date = {
+                    dt.date(): values for dt, values in extraction.time_series
+                }
+                expected_by_col = [
+                    {d: v[i] for d, v in expected.items()} for i in range(n_expected)
+                ]
+                used_series = set()
+                for col_idx, expected_col in enumerate(expected_by_col):
+                    best_idx, best_error, best_resolved_fraction = None, None, None
+                    for series_idx in range(n_extracted):
+                        if series_idx in used_series:
+                            continue
+                        got_col = {
+                            d: values[series_idx]
+                            for d, values in extracted_by_date.items()
+                        }
+                        common = [d for d in expected_col if got_col.get(d) is not None]
+                        if not common:
+                            continue
+                        error = float(
+                            np.mean(
+                                [
+                                    abs(got_col[d] - expected_col[d]) / expected_col[d]
+                                    for d in common
+                                ]
+                            )
+                        )
+                        if best_error is None or error < best_error:
+                            resolved = sum(v is not None for v in got_col.values())
+                            best_idx, best_error, best_resolved_fraction = (
+                                series_idx,
+                                error,
+                                resolved / len(got_col),
+                            )
+                    self.assertIsNotNone(
+                        best_idx, f"{idx}: no series matched csv column {col_idx}"
+                    )
+                    used_series.add(best_idx)
+                    self.assertLess(
+                        best_error,
+                        self.MAX_MEAN_REL_ERROR,
+                        f"{idx}: closest matching series for column {col_idx} is still far off",
+                    )
+                    self.assertGreater(
+                        best_resolved_fraction,
+                        self.MIN_RESOLVED_FRACTION,
+                        f"{idx}: closest matching series for column {col_idx} resolved too few columns",
                     )

@@ -26,6 +26,11 @@ def cut_chart_area(
     """
     0. Cut chart area - stage 1: locate x and y axes to exclude them from chart area
     1. Cut chart area - stage 2: cut empty edges
+
+    `area_loc`'s x1 is the chart area's left edge in the ORIGINAL image's pixel
+    coordinates: since axis-tick pixel positions (used to fit the scales) are also
+    read from the original image, column `i` of the returned `chart_area` always
+    corresponds to absolute image column `x1 + i` -- no further offset needed.
     :param img:
     :param rows_bboxes:
     :param columns_bboxes:
@@ -110,7 +115,7 @@ def cut_chart_area(
     chart_area = img[y1:y2, x1:x2]
     area_loc = (x1, y1, x2, y2)
 
-    return chart_area, area_loc, grid_l + new_x1
+    return chart_area, area_loc
 
 
 def find_largest_empty_rectangle(img_shape, bboxes):
