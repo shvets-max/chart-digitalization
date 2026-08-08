@@ -19,6 +19,23 @@ def simulate_time_series(
     return pd.DataFrame({"date": dates, "value": prices})
 
 
+def simulate_mean_reverting_series(dates, mean_value, volatility=0.02, reversion=0.03):
+    """
+    An Ornstein-Uhlenbeck-style walk that oscillates around `mean_value` for its
+    whole length, rather than a plain random walk's drift (whose variance grows
+    without bound over a multi-year date range, eventually carrying it away from
+    any fixed level for good). Used for dense_crossing charts in
+    generate_scrab_style_chart, which need the noisy line to keep crossing the
+    step lines throughout the date range, not just near the start.
+    """
+    values = np.empty(len(dates))
+    values[0] = mean_value
+    noise = np.random.normal(scale=volatility * mean_value, size=len(dates))
+    for t in range(1, len(dates)):
+        values[t] = values[t - 1] + reversion * (mean_value - values[t - 1]) + noise[t]
+    return pd.DataFrame({"date": dates, "value": values})
+
+
 def generate_linear_scaled(
     start_date,
     end_date,
@@ -232,6 +249,7 @@ def generate_scrab_style_chart(
     start_value=100,
     n_step_series=2,
     log_scale=False,
+    dense_crossing=False,
     output_csv="simulated_scrab.csv",
     output_image="simulated_scrab.png",
 ):
@@ -242,12 +260,29 @@ def generate_scrab_style_chart(
     line, a "Log"/"Lin" scale-toggle label sharing the legend's corner, one
     smooth "actual" line, and `n_step_series` quarterly-revised (step-shaped)
     estimate lines above it.
+
+    By default the step lines sit comfortably above the actual line (as in
+    data/scrab/anet-rev.png), so the lines barely touch. With `dense_crossing`,
+    the step levels are pinned close to the actual line's own level and its
+    volatility is raised, so the noisy line repeatedly crosses every step line
+    over the whole date range -- the shape of data/scrab/nvo-pt.png, avgo-pt.png
+    and panw-pt.png, which is what exposed the gaps and wrong values these tests
+    guard against (see chart_extraction._is_same_trajectory and
+    geometry.cut_chart_area).
     """
     trend = np.random.choice([-1, 1])
-    actual = simulate_time_series(
-        start_date, end_date, start_value, avg_daily_return=1e-3 * trend
-    )
-    dates = actual["date"]
+    if dense_crossing:
+        # A plain random walk's variance grows without bound over a multi-year
+        # range and would eventually carry it away from the steps for good (only
+        # crossing near the start) -- mean-reverting around the step band's
+        # center keeps it crossing throughout instead.
+        dates = pd.date_range(start=start_date, end=end_date, freq="B")
+        actual = simulate_mean_reverting_series(dates, mean_value=start_value)
+    else:
+        actual = simulate_time_series(
+            start_date, end_date, start_value, avg_daily_return=1e-3 * trend
+        )
+        dates = actual["date"]
 
     palette = ["tab:red", "tab:green", "tab:purple", "tab:orange"]
     colors = [palette[i % len(palette)] for i in range(n_step_series)]
@@ -262,11 +297,12 @@ def generate_scrab_style_chart(
 
     step_values = []
     for i in range(n_step_series):
+        multiplier = (0.85 + 0.1 * i) if dense_crossing else (1.3 + 0.4 * i)
         level = _quarterly_step_series(
             dates,
-            start_value * (1.3 + 0.4 * i),
-            volatility=0.03,
-            avg_quarterly_return=3e-2 * trend,
+            start_value * multiplier,
+            volatility=0.02 if dense_crossing else 0.03,
+            avg_quarterly_return=2e-3 * trend if dense_crossing else 3e-2 * trend,
         )
         combined[f"estimate{i + 1}"] = level
         step_values.append(level)
@@ -328,18 +364,27 @@ def generate_scrab_style_chart(
 
 if __name__ == "__main__":
     sample_size = 15
-    linear_path, log_path, in_area_path, multiline_path, scrab_style_path = (
+    (
+        linear_path,
+        log_path,
+        in_area_path,
+        multiline_path,
+        scrab_style_path,
+        dense_crossing_path,
+    ) = (
         os.path.join(TEST_DATA_DIR, "linear_scaled"),
         os.path.join(TEST_DATA_DIR, "log_scaled"),
         os.path.join(TEST_DATA_DIR, "in_area_text"),
         os.path.join(TEST_DATA_DIR, "multiline"),
         os.path.join(TEST_DATA_DIR, "scrab_style"),
+        os.path.join(TEST_DATA_DIR, "dense_crossing"),
     )
     os.makedirs(linear_path, exist_ok=True)
     os.makedirs(log_path, exist_ok=True)
     os.makedirs(in_area_path, exist_ok=True)
     os.makedirs(multiline_path, exist_ok=True)
     os.makedirs(scrab_style_path, exist_ok=True)
+    os.makedirs(dense_crossing_path, exist_ok=True)
 
     np.random.seed(20260801)
     generate_multiline_chart(
@@ -395,4 +440,18 @@ if __name__ == "__main__":
             log_scale=log_scale,
             output_csv=os.path.join(scrab_style_path, f"scrab_style_{i}.csv"),
             output_image=os.path.join(scrab_style_path, f"scrab_style_{i}.png"),
+        )
+
+    # Charts shaped like data/scrab/nvo-pt.png, avgo-pt.png and panw-pt.png: a
+    # noisy actual line that crosses every step line over and over, which is what
+    # exposed the x-axis offset and duplicate-shade-merge bugs these fixtures
+    # regression-test (see TestDenseCrossingExtraction).
+    for i, n_step_series in enumerate([2, 3, 3]):
+        generate_scrab_style_chart(
+            start_date="2022-01-01",
+            end_date="2025-06-30",
+            n_step_series=n_step_series,
+            dense_crossing=True,
+            output_csv=os.path.join(dense_crossing_path, f"dense_crossing_{i}.csv"),
+            output_image=os.path.join(dense_crossing_path, f"dense_crossing_{i}.png"),
         )

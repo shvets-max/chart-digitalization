@@ -105,18 +105,17 @@ class ChartExtraction:
     detected_grid_y: list[int] = field(default_factory=list)  # horizontal grid lines
     x_scale: Optional[FunctionBase] = None
     y_scale: Optional[FunctionBase] = None
-    x_pixel_offset: int = 0  # shift between image x and the x_scale domain
     x_is_datetime: bool = False
     y_is_log: bool = False
     series_names: list = field(default_factory=list)  # legend name per series, or None
 
     def x_value_at(self, x_pixel: float):
         """Axis value (datetime or number) at an image x coordinate."""
-        return self.x_scale(x_pixel - self.x_pixel_offset)
+        return self.x_scale(x_pixel)
 
     def x_pixel_at(self, x_value) -> float:
         """Image x coordinate of an axis value."""
-        return self.x_scale.invert(x_value) + self.x_pixel_offset
+        return self.x_scale.invert(x_value)
 
     def y_value_at(self, y_pixel: float) -> float:
         """Axis value at an image y coordinate."""
@@ -239,7 +238,7 @@ def extract_chart(image_path) -> ChartExtraction:
     rows_bboxes = [box for box, ok in zip(rows_bboxes, valid) if ok]
     row_index = [dt for dt, ok in zip(row_index, valid) if ok]
 
-    cut_area, location, grid_l = cut_chart_area(thresh, rows_bboxes, columns_bboxes)
+    cut_area, location = cut_chart_area(thresh, rows_bboxes, columns_bboxes)
     x_offset, y_offset, x2, y2 = location
 
     # reconstruct grid components
@@ -312,7 +311,7 @@ def extract_chart(image_path) -> ChartExtraction:
         width = chart_area.shape[1]
         time_series = [
             (
-                x_scale(x + x_offset - grid_l),
+                x_scale(x + x_offset),
                 [
                     None if cluster["rows"][x] is None else y_scale(cluster["rows"][x])
                     for cluster in series_clusters
@@ -331,7 +330,6 @@ def extract_chart(image_path) -> ChartExtraction:
             y_scale,
             grid_x_component,
             grid_y_component_map,
-            grid_l,
             x_offset,
             y_offset,
             allowed_margin=5,
@@ -351,7 +349,6 @@ def extract_chart(image_path) -> ChartExtraction:
         detected_grid_y=[int(py) for py in grid_y_component_clusters_centers],
         x_scale=x_scale,
         y_scale=y_scale,
-        x_pixel_offset=int(grid_l),
         x_is_datetime=bool(time_series) and isinstance(time_series[0][0], datetime),
         y_is_log=isinstance(y_scale, Logarithmic),
         series_names=series_names,
@@ -490,14 +487,25 @@ NEAR_GRAY_SATURATION_THRESHOLD = 25  # max-min channel spread below this is "gra
 NEAR_GRAY_MIN_BRIGHTNESS = 150  # mean channel above this is "light" (a real black
 # line is dark; a gridline's anti-aliased edge is desaturated AND light)
 DEFAULT_DUPLICATE_MEDIAN_DISTANCE = 12.0  # px: trajectories this close are one line
-DEFAULT_DUPLICATE_MIN_OVERLAP_FRACTION = 0.3  # of width, to trust the comparison at all
+DEFAULT_DUPLICATE_MIN_OVERLAP_FRACTION = 0.15  # of the SMALLER trajectory's own
+# resolved columns, to trust the comparison at all
+DEFAULT_DUPLICATE_MIN_OVERLAP_SPREAD = 0.3  # of width: shared columns must not all
+# sit in one narrow stretch
+MIN_DUPLICATE_OVERLAP_COLUMNS = 15  # floor so a handful of columns can't pass on
+# fraction alone
 
 
 def _color_spread(color) -> int:
     return max(color) - min(color)
 
 
-def _is_same_trajectory(rows_a, rows_b, max_median_distance, min_overlap_fraction):
+def _is_same_trajectory(
+    rows_a,
+    rows_b,
+    max_median_distance,
+    min_overlap_fraction,
+    min_overlap_spread=DEFAULT_DUPLICATE_MIN_OVERLAP_SPREAD,
+):
     """
     Whether two resolved row trajectories track the same physical line, judged by
     the MEDIAN row distance over their shared columns.
@@ -508,12 +516,35 @@ def _is_same_trajectory(rows_a, rows_b, max_median_distance, min_overlap_fractio
     ink across many rows within one column. The median is robust to those
     slope-driven outliers, while two genuinely different lines differ by a large
     margin at most columns, not just a few.
+
+    Dense line crossings can split ONE physical line's ink into shades whose color
+    distance clears the discovery-time merge threshold, each then resolving on a
+    different, largely disjoint subset of columns (whichever shade happens to sit
+    on that segment): comparing overlap against the full image width would demand
+    more shared columns than either trajectory even has, rejecting real duplicates.
+    Comparing it against the SMALLER trajectory's own resolved count instead asks
+    the right question -- "does the shared evidence corroborate it" -- but that
+    alone would also pass two genuinely different lines that merely cross paths
+    for a while, since a crossing produces a run of near-zero distance too. The
+    spread check rules that out: shared columns from anti-aliasing shades of one
+    line are scattered across the whole trajectory, while a crossing's shared
+    columns cluster in the narrow stretch where the lines actually meet.
     """
-    diffs = [
-        abs(a - b) for a, b in zip(rows_a, rows_b) if a is not None and b is not None
+    overlap_idx = [
+        i
+        for i, (a, b) in enumerate(zip(rows_a, rows_b))
+        if a is not None and b is not None
     ]
-    if len(diffs) < min_overlap_fraction * len(rows_a):
+    if len(overlap_idx) < MIN_DUPLICATE_OVERLAP_COLUMNS:
         return False
+    smaller_count = min(
+        sum(r is not None for r in rows_a), sum(r is not None for r in rows_b)
+    )
+    if len(overlap_idx) < min_overlap_fraction * smaller_count:
+        return False
+    if overlap_idx[-1] - overlap_idx[0] < min_overlap_spread * len(rows_a):
+        return False
+    diffs = [abs(rows_a[i] - rows_b[i]) for i in overlap_idx]
     return float(np.median(diffs)) <= max_median_distance
 
 
@@ -550,7 +581,12 @@ def select_series_clusters(
 
     Candidates whose resolved trajectory nearly matches an already-accepted one
     (e.g. a second anti-aliasing shade of the same line) are merged into it rather
-    than discarded, so no real ink is lost.
+    than discarded, so no real ink is lost. `min_resolved_fraction` is checked only
+    on the FINAL, post-merge groups: dense line crossings can split one physical
+    line's ink into shades that individually resolve well under that bar (each on
+    whatever columns that particular shade happens to win), so gating candidacy on
+    it before merging would throw those shades away before they ever got a chance
+    to reunite.
 
     Returns a list of {"color", "mask", "rows", ...} ordered by descending
     resolved-column count.
@@ -580,8 +616,7 @@ def select_series_clusters(
             allowed_margin,
         )
         resolved_count = sum(r is not None for r in rows)
-        if resolved_count >= min_resolved_fraction * width:
-            resolved.append({**cluster, "rows": rows, "resolved_count": resolved_count})
+        resolved.append({**cluster, "rows": rows, "resolved_count": resolved_count})
     resolved.sort(key=lambda c: -c["resolved_count"])
 
     groups = []
@@ -621,7 +656,8 @@ def select_series_clusters(
         # which only ever narrows the spread between them.
         if _color_spread(candidate["color"]) > _color_spread(match["color"]):
             match["color"] = candidate["color"]
-    return groups
+
+    return [g for g in groups if g["resolved_count"] >= min_resolved_fraction * width]
 
 
 def extract_time_series_from_chart_area(
@@ -630,7 +666,6 @@ def extract_time_series_from_chart_area(
     y_scale,
     grid_x_component,
     grid_y_component_map,
-    grid_l,
     x_offset,
     y_offset,
     allowed_margin=5,
@@ -642,7 +677,7 @@ def extract_time_series_from_chart_area(
     )
     time_series = [
         (
-            x_scale(x + x_offset - grid_l),
+            x_scale(x + x_offset),
             [None if rows[x] is None else y_scale(rows[x])],
         )
         for x in range(width)
@@ -657,7 +692,6 @@ def extract_multi_series_from_chart_area(
     y_scale,
     grid_x_component,
     grid_y_component_map,
-    grid_l,
     x_offset,
     y_offset,
     allowed_margin=5,
@@ -677,7 +711,7 @@ def extract_multi_series_from_chart_area(
     ]
     time_series = [
         (
-            x_scale(x + x_offset - grid_l),
+            x_scale(x + x_offset),
             [None if rows[x] is None else y_scale(rows[x]) for rows in all_rows],
         )
         for x in range(width)
