@@ -1,9 +1,13 @@
-from typing import Callable, Optional
+import logging
+from collections.abc import Callable, Sequence
+from typing import Optional
 
 import numpy as np
 
-from data_integrity import ensure_linear_continuity
-from function import Linear, LinearDatetime, Logarithmic
+from src.data_integrity import ensure_linear_continuity
+from src.function import Linear, LinearDatetime, Logarithmic
+
+logger = logging.getLogger(__name__)
 
 
 def _r_squared(x: np.ndarray, y: np.ndarray) -> float:
@@ -11,8 +15,9 @@ def _r_squared(x: np.ndarray, y: np.ndarray) -> float:
     slope, intercept = np.polyfit(x, y, 1)
     residuals = y - (slope * x + intercept)
     centered = y - y.mean()
-    ss_res, ss_tot = float(np.dot(residuals, residuals)), float(
-        np.dot(centered, centered)
+    ss_res, ss_tot = (
+        float(np.dot(residuals, residuals)),
+        float(np.dot(centered, centered)),
     )
     return 1.0 - ss_res / ss_tot if ss_tot else 1.0
 
@@ -121,12 +126,16 @@ def log_ticks(vmin: float, vmax: float, count: int = 6) -> list[float]:
     return candidates or nice_ticks(vmin, vmax, count)
 
 
-def create_y_scale(values, knots: np.ndarray) -> Optional[Callable]:
+def create_y_scale(values: Sequence[float], knots: np.ndarray) -> Optional[Callable]:
     """
+    Fit a y-axis scale (log or linear, whichever fits better) mapping pixel
+    coordinate to value.
 
-    :param values:
-    :param knots:
-    :return: function mapping y-coordinate to value. Function should be reversible.
+    :param values: axis tick values
+    :param knots: pixel coordinate of each tick
+    :return: reversible function mapping y-coordinate to value, or None if there
+        are fewer than 2 ticks.
+    :raises ValueError: if `values` and `knots` differ in length.
     """
     if len(knots) != len(values):
         raise ValueError("Number of bounding boxes and numbers must match")
@@ -135,23 +144,30 @@ def create_y_scale(values, knots: np.ndarray) -> Optional[Callable]:
         return None
 
     if is_log_scale(values, knots):
-        print("Using logarithmic scale for y-axis")
+        logger.info("Using logarithmic scale for y-axis")
         arg_sorted = np.argsort(knots)
         y_sorted = knots[arg_sorted]
         n_sorted = np.array(values)[arg_sorted]
         return Logarithmic(knots=y_sorted, values=n_sorted)
-    else:
-        print("Using linear scale for y-axis")
-        values, knots = ensure_linear_continuity(
-            x1=np.array(values), x2=np.array(knots)
-        )
-        arg_sorted = np.argsort(knots)
-        y_sorted = knots[arg_sorted]
-        n_sorted = np.array(values)[arg_sorted]
-        return Linear(knots=y_sorted, values=n_sorted)
+
+    logger.info("Using linear scale for y-axis")
+    values, knots = ensure_linear_continuity(x1=np.array(values), x2=np.array(knots))
+    arg_sorted = np.argsort(knots)
+    y_sorted = knots[arg_sorted]
+    n_sorted = np.array(values)[arg_sorted]
+    return Linear(knots=y_sorted, values=n_sorted)
 
 
-def create_x_scale(row_index, knots: np.ndarray) -> Optional[Callable]:
+def create_x_scale(row_index: Sequence, knots: np.ndarray) -> Optional[Callable]:
+    """
+    Fit an x-axis scale (datetime or linear) mapping pixel coordinate to value.
+
+    :param row_index: axis tick values (datetimes or numbers)
+    :param knots: pixel coordinate of each tick
+    :return: reversible function mapping x-coordinate to value, or None if there
+        are fewer than 2 ticks.
+    :raises ValueError: if `row_index` and `knots` differ in length.
+    """
     if len(knots) != len(row_index):
         raise ValueError("Number of bounding boxes and index values must match")
 
@@ -164,5 +180,4 @@ def create_x_scale(row_index, knots: np.ndarray) -> Optional[Callable]:
 
     if hasattr(idx_sorted[0], "year") and hasattr(idx_sorted[-1], "year"):
         return LinearDatetime(knots=x_sorted, datetimes=idx_sorted)
-    else:
-        return Linear(knots=x_sorted, values=idx_sorted)
+    return Linear(knots=x_sorted, values=idx_sorted)

@@ -1,4 +1,5 @@
-from typing import Iterable
+from collections.abc import Iterable
+from typing import Optional
 
 import numpy as np
 
@@ -68,12 +69,12 @@ def ensure_linear_continuity(
     return final_x1, final_x2
 
 
-def find_missing_points(arr: np.ndarray):
+def find_missing_points(arr: np.ndarray) -> list[float]:
     """
     Find missing points in a sorted array based on expected step size.
 
-    :param arr:
-    :return:
+    :param arr: array of points, not necessarily sorted
+    :return: values inferred to be missing between existing points
     """
     arr_sorted = np.sort(arr)
     diffs = np.diff(arr_sorted)
@@ -93,19 +94,15 @@ def find_missing_points(arr: np.ndarray):
 def assign_numbers_to_missing_points(
     bboxes_y_centers: np.ndarray,
     column_numbers: np.ndarray,
-    missing_points: list,
-):
+    missing_points: list[float],
+) -> list[Optional[float]]:
+    """Linearly interpolate a value for each missing point from its neighbors."""
     # Sort by y-center (ascending)
     sorted_indices = np.argsort(bboxes_y_centers)
     y_sorted = np.array(bboxes_y_centers)[sorted_indices]
     n_sorted = np.array(column_numbers)[sorted_indices]
 
-    # Estimate step (assume linear)
-    # steps = np.diff(y_sorted)
-    # num_steps = np.diff(n_sorted)
-    # avg_step = np.mean(num_steps / steps)
-
-    assigned = []
+    assigned: list[Optional[float]] = []
     for mp in missing_points:
         # Find where the missing point fits
         idx = np.searchsorted(y_sorted, mp)

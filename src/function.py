@@ -1,24 +1,26 @@
+import logging
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from datetime import datetime
 
 import numpy as np
 from scipy.interpolate import interp1d
 
+logger = logging.getLogger(__name__)
+
 
 class FunctionBase(ABC):
     @abstractmethod
-    def __call__(self, x):
+    def __call__(self, x: float):
         """Forward mapping: pixel to value."""
-        pass
 
     @abstractmethod
     def invert(self, v):
         """Inverse mapping: value to pixel."""
-        pass
 
 
 class Linear(FunctionBase):
-    def __init__(self, knots, values):
+    def __init__(self, knots: Sequence[float], values: Sequence[float]):
         # knots: pixel coordinates, values: corresponding values
         self.knots = np.array(knots)
         self.values = np.array(values)
@@ -29,15 +31,15 @@ class Linear(FunctionBase):
             self.values, self.knots, kind="linear", fill_value="extrapolate"
         )
 
-    def __call__(self, px: int):
+    def __call__(self, px: float) -> float:
         return float(self.interpolator(px))
 
-    def invert(self, v):
+    def invert(self, v: float) -> float:
         return float(self.inverse_interpolator(v))
 
 
 class LinearDatetime(FunctionBase):
-    def __init__(self, knots, datetimes):
+    def __init__(self, knots: Sequence[float], datetimes: Sequence[datetime]):
         # knots: pixel coordinates, datetimes: corresponding datetime objects
         self.knots = np.array(knots)
         self.timestamps = np.array([dt.timestamp() for dt in datetimes])
@@ -48,19 +50,18 @@ class LinearDatetime(FunctionBase):
             self.timestamps, self.knots, kind="linear", fill_value="extrapolate"
         )
 
-    def __call__(self, px: int):
-        # Return datetime for given pixel coordinate
+    def __call__(self, px: float) -> datetime:
+        """Datetime for the given pixel coordinate."""
         ts = float(self.interpolator(px))
         return datetime.fromtimestamp(ts)
 
-    def invert(self, dt: datetime):
-        # Return pixel coordinate for given datetime
-        ts = dt.timestamp()
-        return float(self.inverse_interpolator(ts))
+    def invert(self, dt: datetime) -> float:
+        """Pixel coordinate for the given datetime."""
+        return float(self.inverse_interpolator(dt.timestamp()))
 
 
 class Logarithmic(FunctionBase):
-    def __init__(self, knots, values):
+    def __init__(self, knots: Sequence[float], values: Sequence[float]):
         # knots: pixel coordinates, values: corresponding values
         self.knots = np.array(knots)
         self.log_values = np.log(np.array(values))
@@ -71,14 +72,13 @@ class Logarithmic(FunctionBase):
             self.log_values, self.knots, kind="linear", fill_value="extrapolate"
         )
 
-    def __call__(self, px: int):
-        # Returns value for given pixel coordinate
+    def __call__(self, px: float) -> float:
+        """Value for the given pixel coordinate."""
         val = float(np.exp(self.interpolator(px)))
         if not val:
-            print(val)
+            logger.warning("Logarithmic scale evaluated to zero at pixel %s", px)
         return val
 
-    def invert(self, v):
-        # Returns pixel coordinate for given value
-        log_v = np.log(v)
-        return float(self.inverse_interpolator(log_v))
+    def invert(self, v: float) -> float:
+        """Pixel coordinate for the given value."""
+        return float(self.inverse_interpolator(np.log(v)))

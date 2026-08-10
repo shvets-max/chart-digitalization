@@ -13,11 +13,12 @@ from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from chart_extraction import ChartExtraction, build_axis_ticks, extract_chart
+from src.chart_extraction import ChartExtraction, build_axis_ticks, extract_chart
 
 logger = logging.getLogger(__name__)
 
-STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+STATIC_DIR = os.path.join(PROJECT_ROOT, "static")
 ALLOWED_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 MAX_STORED_CHARTS = 20

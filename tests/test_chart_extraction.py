@@ -6,7 +6,7 @@ from unittest import TestCase
 
 import numpy as np
 
-from chart_extraction import (
+from src.chart_extraction import (
     adjust_knots_to_grid,
     extract_chart,
     extract_time_series,
@@ -14,8 +14,8 @@ from chart_extraction import (
     select_axis_tick_group,
     select_series_clusters,
 )
-from function import Linear
-from ocr_utils import texts_to_numbers
+from src.function import Linear
+from src.ocr_utils import texts_to_numbers
 from tests.test_data import adjust_knots_to_grid_data, extract_series_interference_data
 
 TEST_DATA_DIR = os.path.join(os.path.dirname(__file__), "data")

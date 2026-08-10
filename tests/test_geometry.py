@@ -1,6 +1,6 @@
 from unittest import TestCase
 
-from geometry import cluster_data
+from src.geometry import cluster_data
 from tests.test_data import cluster_data_data
 
 

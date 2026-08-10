@@ -1,6 +1,6 @@
 from unittest import TestCase
 
-from date_utils import DateComponentClassifier
+from src.date_utils import DateComponentClassifier
 from tests.test_data import date_component_classify_data
 
 

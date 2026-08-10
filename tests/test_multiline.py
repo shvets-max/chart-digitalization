@@ -2,7 +2,11 @@ from unittest import TestCase
 
 import numpy as np
 
-from multiline import cluster_ink_colors, find_legend_entries, match_series_to_legend
+from src.multiline import (
+    cluster_ink_colors,
+    find_legend_entries,
+    match_series_to_legend,
+)
 
 
 def _paint_box(img, box, color):

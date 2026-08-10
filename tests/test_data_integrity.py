@@ -2,7 +2,7 @@ from unittest import TestCase
 
 import numpy as np
 
-from data_integrity import ensure_linear_continuity, find_minimal_powers_of_10
+from src.data_integrity import ensure_linear_continuity, find_minimal_powers_of_10
 from tests.test_data import (
     ensure_linear_continuity_data,
     find_minimal_powers_of_10_data,
