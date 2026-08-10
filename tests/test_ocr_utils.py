@@ -1,6 +1,6 @@
 from unittest import TestCase
 
-from ocr_utils import texts_to_datetimes
+from src.ocr_utils import texts_to_datetimes
 from tests.test_data import texts_to_datetimes_data
 
 

@@ -1,4 +1,5 @@
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
@@ -6,11 +7,15 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from function import FunctionBase, Logarithmic
-from geometry import cluster_data, cut_chart_area, get_column_bboxes, get_row_bboxes
-from multiline import cluster_ink_colors, find_legend_entries, match_series_to_legend
-from ocr_utils import ocr, texts_to_datetimes, texts_to_numbers
-from scale import (
+from src.function import FunctionBase, Logarithmic
+from src.geometry import cluster_data, cut_chart_area, get_column_bboxes, get_row_bboxes
+from src.multiline import (
+    cluster_ink_colors,
+    find_legend_entries,
+    match_series_to_legend,
+)
+from src.ocr_utils import ocr, texts_to_datetimes, texts_to_numbers
+from src.scale import (
     create_x_scale,
     create_y_scale,
     drop_monotonicity_outliers,
@@ -18,8 +23,28 @@ from scale import (
     nice_ticks,
 )
 
+# Series-cluster selection (see select_series_clusters)
+DEFAULT_MIN_RESOLVED_FRACTION = (
+    0.5  # of columns a color must resolve to count as a series
+)
+DEFAULT_MIN_CANDIDATE_COLUMN_COVERAGE = 0.15  # loose pre-filter before resolving
+NEAR_GRAY_SATURATION_THRESHOLD = 25  # max-min channel spread below this is "gray"
+NEAR_GRAY_MIN_BRIGHTNESS = 150  # mean channel above this is "light" (a real black
+# line is dark; a gridline's anti-aliased edge is desaturated AND light)
 
-def select_axis_tick_group(ids, texts, parser):
+# Duplicate-trajectory merging (see _is_same_trajectory)
+DEFAULT_DUPLICATE_MEDIAN_DISTANCE = 12.0  # px: trajectories this close are one line
+DEFAULT_DUPLICATE_MIN_OVERLAP_FRACTION = 0.15  # of the SMALLER trajectory's own
+# resolved columns, to trust the comparison at all
+DEFAULT_DUPLICATE_MIN_OVERLAP_SPREAD = 0.3  # of width: shared columns must not all
+# sit in one narrow stretch
+MIN_DUPLICATE_OVERLAP_COLUMNS = 15  # floor so a handful of columns can't pass on
+# fraction alone
+
+
+def select_axis_tick_group(
+    ids: list[list[int]], texts: list[str], parser: Callable[[list[str]], list]
+) -> int:
     """
     Index of the OCR bbox group most likely to be the axis' tick labels: the one
     with the most entries `parser` (texts_to_numbers or texts_to_datetimes) can
@@ -45,7 +70,12 @@ def select_axis_tick_group(ids, texts, parser):
     return max(range(len(ids)), key=lambda i: scores[i])
 
 
-def adjust_knots_to_grid(knots, grid_centers, min_dist=1, max_dist=10):
+def adjust_knots_to_grid(
+    knots: np.ndarray,
+    grid_centers: list[float],
+    min_dist: float = 1,
+    max_dist: float = 10,
+) -> np.ndarray:
     """
     Adjusts each knot to the closest grid center if the distance is within
     (min_dist, max_dist].
@@ -62,7 +92,7 @@ def adjust_knots_to_grid(knots, grid_centers, min_dist=1, max_dist=10):
     return knots
 
 
-def fill_gaps_in_time_series(time_series, window_size=5):
+def fill_gaps_in_time_series(time_series: list, window_size: int = 5) -> list:
     """
     Fill gaps (None values) in each series by averaging the nearest previous and
     next non-None values within a window.
@@ -201,7 +231,7 @@ def build_axis_ticks(
     return {"x": x_ticks, "y": y_ticks}
 
 
-def extract_chart(image_path) -> ChartExtraction:
+def extract_chart(image_path: str) -> ChartExtraction:
     """Digitalize a chart image: the series plus the pixel geometry to draw it."""
     # Load image
     if not os.path.exists(image_path):
@@ -355,7 +385,7 @@ def extract_chart(image_path) -> ChartExtraction:
     )
 
 
-def extract_time_series(image_path):
+def extract_time_series(image_path: str) -> list:
     """Digitalize a chart image into [(x_value, [y_value, ...]), ...]."""
     return extract_chart(image_path).time_series
 
@@ -477,22 +507,6 @@ def resolve_series_pixel_rows(
         ink_mask, grid_y_component_map, rows_kept, grid_x_lookup, allowed_margin
     )
     return resolve_series_rows(candidates, estimate_max_step(candidates, height))
-
-
-DEFAULT_MIN_RESOLVED_FRACTION = (
-    0.5  # of columns a color must resolve to count as a series
-)
-DEFAULT_MIN_CANDIDATE_COLUMN_COVERAGE = 0.15  # loose pre-filter before resolving
-NEAR_GRAY_SATURATION_THRESHOLD = 25  # max-min channel spread below this is "gray"
-NEAR_GRAY_MIN_BRIGHTNESS = 150  # mean channel above this is "light" (a real black
-# line is dark; a gridline's anti-aliased edge is desaturated AND light)
-DEFAULT_DUPLICATE_MEDIAN_DISTANCE = 12.0  # px: trajectories this close are one line
-DEFAULT_DUPLICATE_MIN_OVERLAP_FRACTION = 0.15  # of the SMALLER trajectory's own
-# resolved columns, to trust the comparison at all
-DEFAULT_DUPLICATE_MIN_OVERLAP_SPREAD = 0.3  # of width: shared columns must not all
-# sit in one narrow stretch
-MIN_DUPLICATE_OVERLAP_COLUMNS = 15  # floor so a handful of columns can't pass on
-# fraction alone
 
 
 def _color_spread(color) -> int:
@@ -717,8 +731,3 @@ def extract_multi_series_from_chart_area(
         for x in range(width)
     ]
     return time_series[::-1] if reversed else time_series
-
-
-# from PIL import Image
-# im = Image.fromarray(c2*255)
-# im.show()

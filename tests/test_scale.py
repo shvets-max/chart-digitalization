@@ -2,8 +2,8 @@ from unittest import TestCase
 
 import numpy as np
 
-from function import Linear, Logarithmic
-from scale import create_y_scale, drop_monotonicity_outliers, is_log_scale
+from src.function import Linear, Logarithmic
+from src.scale import create_y_scale, drop_monotonicity_outliers, is_log_scale
 
 
 class TestIsLogScale(TestCase):

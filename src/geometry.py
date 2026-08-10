@@ -1,8 +1,11 @@
+from collections.abc import Sequence
+
 import cv2
 import numpy as np
 
 
-def cluster_data(points, margin):
+def cluster_data(points: Sequence[float], margin: float) -> list[list[float]]:
+    """Group sorted `points` into clusters where consecutive points differ by at most `margin`."""
     points = sorted(points)
     if not points:
         return []
@@ -118,7 +121,10 @@ def cut_chart_area(
     return chart_area, area_loc
 
 
-def find_largest_empty_rectangle(img_shape, bboxes):
+def find_largest_empty_rectangle(
+    img_shape: tuple[int, int], bboxes: list[tuple[int, int, int, int]]
+) -> tuple[int, int, int, int]:
+    """Largest axis-aligned rectangle not overlapping any of `bboxes`, as (x, y, w, h)."""
     mask = np.zeros(img_shape[:2], dtype=np.uint8)
     for left, top, right, bottom in bboxes:
         cv2.rectangle(mask, (left, top), (right, bottom), 255, -1)
@@ -158,7 +164,8 @@ def find_largest_empty_rectangle(img_shape, bboxes):
     return max_rect  # (x, y, w, h)
 
 
-def get_lines(img):
+def get_lines(img: np.ndarray) -> np.ndarray:
+    """Straight line segments detected in `img` via Canny edges + probabilistic Hough transform."""
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(gray, 50, 150, apertureSize=3)
 
@@ -172,8 +179,8 @@ def get_lines(img):
     return []
 
 
-def find_largest_rectangle(img):
-    # Convert to grayscale and threshold to binary
+def find_largest_rectangle(img: np.ndarray) -> tuple[int, int, int, int]:
+    """Bounding rectangle of the chart's near-full-width/height axis lines, as (x, y, w, h)."""
     lines = get_lines(img)
     h_lines = lines[lines[:, 1] == lines[:, 3]]
     v_lines = lines[lines[:, 0] == lines[:, 2]]
@@ -201,67 +208,53 @@ def find_largest_rectangle(img):
     return x1, y1, x2 - x1, y2 - y1  # (x, y, w, h)
 
 
-def get_column_bboxes(bboxes: list, x_overlap_thresh: float = 0.7):
+def _group_bboxes_by_overlap(
+    bboxes: list, axis_start: int, axis_end: int, overlap_thresh: float
+) -> tuple[list[list[int]], list[list]]:
     """
-    Group bounding boxes into columns based on horizontal overlap.
+    Group bounding boxes sharing at least `overlap_thresh` overlap along one axis.
 
-    :param bboxes:
-    :param x_overlap_thresh:
-    :return:
+    :param bboxes: list of (left, top, right, bottom) boxes
+    :param axis_start: index of the axis' start coordinate (0 for x, 1 for y)
+    :param axis_end: index of the axis' end coordinate (2 for x, 3 for y)
+    :param overlap_thresh: minimum fraction of the smaller box's span that must overlap
+    :return: (index groups, box groups), one entry per group of 2+ overlapping boxes
     """
-    ids, columns = [], []
+    ids, groups = [], []
     used = set()
     for i, box in enumerate(bboxes):
         if i in used:
             continue
-        col, col_ids = [box], [i]
+        group, group_ids = [box], [i]
         used.add(i)
         for j, other in enumerate(bboxes):
             if j in used:
                 continue
-            # Compute horizontal overlap
-            left = max(box[0], other[0])
-            right = min(box[2], other[2])
-            overlap = max(0, right - left)
-            width = min(box[2] - box[0], other[2] - other[0])
-            if width > 0 and overlap / width > x_overlap_thresh:
-                col.append(other)
-                col_ids.append(j)
+            start = max(box[axis_start], other[axis_start])
+            end = min(box[axis_end], other[axis_end])
+            overlap = max(0, end - start)
+            span = min(
+                box[axis_end] - box[axis_start], other[axis_end] - other[axis_start]
+            )
+            if span > 0 and overlap / span > overlap_thresh:
+                group.append(other)
+                group_ids.append(j)
                 used.add(j)
-        if len(col) > 1:
-            columns.append(col)
-            ids.append(col_ids)
-    return ids, columns
+        if len(group) > 1:
+            groups.append(group)
+            ids.append(group_ids)
+    return ids, groups
 
 
-def get_row_bboxes(bboxes: list, y_overlap_thresh: float = 0.7):
-    """
-    Group bounding boxes into rows based on vertical overlap.
+def get_column_bboxes(
+    bboxes: list, x_overlap_thresh: float = 0.7
+) -> tuple[list[list[int]], list[list]]:
+    """Group bounding boxes into columns based on horizontal overlap."""
+    return _group_bboxes_by_overlap(bboxes, 0, 2, x_overlap_thresh)
 
-    :param bboxes:
-    :param y_overlap_thresh:
-    :return:
-    """
-    ids, rows = [], []
-    used = set()
-    for i, box in enumerate(bboxes):
-        if i in used:
-            continue
-        row, row_ids = [box], [i]
-        used.add(i)
-        for j, other in enumerate(bboxes):
-            if j in used:
-                continue
-            # Compute vertical overlap
-            top = max(box[1], other[1])
-            bottom = min(box[3], other[3])
-            overlap = max(0, bottom - top)
-            height = min(box[3] - box[1], other[3] - other[1])
-            if height > 0 and overlap / height > y_overlap_thresh:
-                row.append(other)
-                row_ids.append(j)
-                used.add(j)
-        if len(row) > 1:
-            rows.append(row)
-            ids.append(row_ids)
-    return ids, rows
+
+def get_row_bboxes(
+    bboxes: list, y_overlap_thresh: float = 0.7
+) -> tuple[list[list[int]], list[list]]:
+    """Group bounding boxes into rows based on vertical overlap."""
+    return _group_bboxes_by_overlap(bboxes, 1, 3, y_overlap_thresh)

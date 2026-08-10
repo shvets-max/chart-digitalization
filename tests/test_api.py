@@ -1,8 +1,8 @@
 from unittest import TestCase
 
-from api import _series_payload
-from chart_extraction import ChartExtraction
-from function import Linear
+from api.api import _series_payload
+from src.chart_extraction import ChartExtraction
+from src.function import Linear
 
 
 def _extraction(series_names, time_series):

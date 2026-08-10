@@ -1,7 +1,12 @@
+from typing import Optional
+
 import numpy as np
 
-from geometry import get_row_bboxes
-from ocr_utils import texts_to_numbers
+from src.geometry import get_row_bboxes
+from src.ocr_utils import texts_to_numbers
+
+Color = tuple[int, int, int]
+Box = tuple[int, int, int, int]
 
 DEFAULT_COLOR_MERGE_DISTANCE = 40.0
 DEFAULT_MAX_LEGEND_MATCH_DISTANCE = 80.0
@@ -18,8 +23,10 @@ SWATCH_GAP = 2
 
 
 def cluster_ink_colors(
-    color_area, ink_mask, merge_distance=DEFAULT_COLOR_MERGE_DISTANCE
-):
+    color_area: np.ndarray,
+    ink_mask: np.ndarray,
+    merge_distance: float = DEFAULT_COLOR_MERGE_DISTANCE,
+) -> list[dict]:
     """
     Group the ink pixels of `color_area` (BGR) by color.
 
@@ -99,12 +106,12 @@ def _is_numeric_token(text: str) -> bool:
     return texts_to_numbers([text])[0] is not None
 
 
-def _union_bbox(boxes):
+def _union_bbox(boxes: list[Box]) -> Box:
     lefts, tops, rights, bottoms = zip(*boxes)
     return min(lefts), min(tops), max(rights), max(bottoms)
 
 
-def _dominant_ink_color(color_img, box):
+def _dominant_ink_color(color_img: np.ndarray, box: Box) -> Optional[Color]:
     """Modal color of the non-background pixels inside `box` (left, top, right, bottom)."""
     left, top, right, bottom = box
     left, top = max(0, left), max(0, top)
@@ -127,11 +134,11 @@ def _dominant_ink_color(color_img, box):
     return tuple(int(v) for v in unique[np.argmax(counts)])
 
 
-def _is_saturated(color) -> bool:
+def _is_saturated(color: Color) -> bool:
     return (max(color) - min(color)) >= SATURATION_THRESHOLD
 
 
-def _swatch_color(color_img, first_token_box):
+def _swatch_color(color_img: np.ndarray, first_token_box: Box) -> Optional[Color]:
     """Dominant color immediately left of a legend row's first token, matplotlib-style."""
     left, top, right, bottom = first_token_box
     x_end = max(0, left - SWATCH_GAP)
@@ -141,7 +148,9 @@ def _swatch_color(color_img, first_token_box):
     return _dominant_ink_color(color_img, (x_start, top, x_end, bottom))
 
 
-def find_legend_entries(texts, bboxes, chart_area, color_img):
+def find_legend_entries(
+    texts: list[str], bboxes: list[Box], chart_area: Box, color_img: np.ndarray
+) -> list[dict]:
     """
     Detect legend rows in the top-left of the chart area: each row is a
     left-to-right run of OCR tokens forming a series name, optionally followed by
@@ -236,8 +245,10 @@ def find_legend_entries(texts, bboxes, chart_area, color_img):
 
 
 def match_series_to_legend(
-    series_colors, legend_entries, max_distance=DEFAULT_MAX_LEGEND_MATCH_DISTANCE
-):
+    series_colors: list[Color],
+    legend_entries: list[dict],
+    max_distance: float = DEFAULT_MAX_LEGEND_MATCH_DISTANCE,
+) -> list[Optional[str]]:
     """
     Greedily pair each series color with its nearest legend entry color (Euclidean,
     BGR); each legend entry is used at most once. Returns one name per series,
