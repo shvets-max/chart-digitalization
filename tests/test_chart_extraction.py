@@ -304,6 +304,93 @@ class TestInAreaTextExtraction(TestCase):
                     )
 
 
+class TestTextsToNumbers(TestCase):
+    """Unit tests for texts_to_numbers, isolated from full chart extraction."""
+
+    def test_plain_and_suffixed_numbers(self):
+        self.assertEqual(
+            texts_to_numbers(["100", "1.5k", "2m", "3b", "50%"]),
+            [100.0, 1500.0, 2e6, 3e9, 0.5],
+        )
+
+    def test_unparsable_text_returns_none(self):
+        self.assertEqual(texts_to_numbers(["100", "n/a", "200"]), [100.0, None, 200.0])
+
+    def test_comma_as_decimal_separator(self):
+        self.assertEqual(texts_to_numbers(["1,5", "2,0"]), [1.5, 2.0])
+
+    def test_recovers_b_suffix_misread_as_trailing_8(self):
+        # Real OCR misreadings from a column axis: "B" (billions) rendered as
+        # "8" in most tokens ("298" -> "29B", "8.458" -> "8.45B"), while a few
+        # tokens keep the correct "B" ("9.2B"). Series-aware recovery should
+        # use the surviving "B" tokens to fix the "8"-suffixed ones instead of
+        # parsing them as wildly smaller plain numbers.
+        texts = [
+            "298",
+            "268",
+            "238",
+            "218",
+            "198",
+            "15.5B",
+            "12.88",
+            "10,.4B",
+            "9.2B",
+            "8.458",
+            "7.658",
+            "7.058",
+            "6.45B",
+            "5.858",
+            "5.25B",
+            "4.758",
+            "4.358",
+            "3.95B",
+            "3.55B",
+            "3.258",
+            "2.978",
+            "2.738",
+            "2.518",
+            "2.31B",
+        ]
+        expected = [
+            2.9e10,
+            2.6e10,
+            2.3e10,
+            2.1e10,
+            1.9e10,
+            1.55e10,
+            1.28e10,
+            1.04e10,
+            9.2e9,
+            8.45e9,
+            7.65e9,
+            7.05e9,
+            6.45e9,
+            5.85e9,
+            5.25e9,
+            4.75e9,
+            4.35e9,
+            3.95e9,
+            3.55e9,
+            3.25e9,
+            2.97e9,
+            2.73e9,
+            2.51e9,
+            2.31e9,
+        ]
+        numbers = texts_to_numbers(texts)
+        for actual, want in zip(numbers, expected):
+            self.assertAlmostEqual(actual, want, delta=1e6)
+        # the recovered series should be monotonically decreasing, matching a
+        # real axis -- confirms the "8"->"B" fix, not just individual values
+        self.assertTrue(all(a > b for a, b in zip(numbers, numbers[1:])))
+
+    def test_lone_stray_suffix_does_not_force_correction(self):
+        # Only one token in the whole series ends in "B" -- not enough signal
+        # to treat "B" as the series' dominant unit, so a plain "8"-ending
+        # number should be left alone rather than reinterpreted as billions.
+        self.assertEqual(texts_to_numbers(["100", "108", "1B"]), [100.0, 108.0, 1e9])
+
+
 class TestSelectAxisTickGroup(TestCase):
     """
     Unit tests for select_axis_tick_group, isolated from full chart extraction.
