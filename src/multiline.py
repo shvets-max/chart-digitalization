@@ -1,6 +1,7 @@
 from typing import Optional
 
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 
 from src.geometry import get_row_bboxes
 from src.ocr_utils import texts_to_numbers
@@ -250,28 +251,27 @@ def match_series_to_legend(
     max_distance: float = DEFAULT_MAX_LEGEND_MATCH_DISTANCE,
 ) -> list[Optional[str]]:
     """
-    Greedily pair each series color with its nearest legend entry color (Euclidean,
-    BGR); each legend entry is used at most once. Returns one name per series,
-    None where no legend entry is close enough (or there is no legend).
+    Pair each series color with a legend entry color (Euclidean, BGR) so that the
+    total distance across all pairs is minimal; each legend entry is used at most
+    once. If there are at least as many legend entries as series, every series is
+    assigned one (even past `max_distance`); otherwise a series is left unmatched
+    (None) when its best remaining legend entry is farther than `max_distance`.
     """
-    pairs = []
-    for s_idx, color in enumerate(series_colors):
-        for l_idx, entry in enumerate(legend_entries):
-            dist = float(
-                np.linalg.norm(
-                    np.array(color, dtype=float) - np.array(entry["color"], dtype=float)
-                )
-            )
-            if dist <= max_distance:
-                pairs.append((dist, s_idx, l_idx))
-    pairs.sort(key=lambda p: p[0])
-
     names = [None] * len(series_colors)
-    used_legend, used_series = set(), set()
-    for _, s_idx, l_idx in pairs:
-        if s_idx in used_series or l_idx in used_legend:
-            continue
-        names[s_idx] = legend_entries[l_idx]["name"]
-        used_series.add(s_idx)
-        used_legend.add(l_idx)
+    if not series_colors or not legend_entries:
+        return names
+
+    distances = np.linalg.norm(
+        np.array(series_colors, dtype=float)[:, None, :]
+        - np.array([entry["color"] for entry in legend_entries], dtype=float)[
+            None, :, :
+        ],
+        axis=2,
+    )
+    row_idx, col_idx = linear_sum_assignment(distances)
+
+    guaranteed_match = len(legend_entries) >= len(series_colors)
+    for s_idx, l_idx in zip(row_idx, col_idx):
+        if guaranteed_match or distances[s_idx, l_idx] <= max_distance:
+            names[s_idx] = legend_entries[l_idx]["name"]
     return names
