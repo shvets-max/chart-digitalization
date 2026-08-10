@@ -53,28 +53,66 @@ def ocr(img):
     return words, bboxes
 
 
+_SUFFIX_MULTIPLIERS = {"k": 1e3, "m": 1e6, "b": 1e9, "%": 1e-2}
+# Digits OCR commonly confuses with a unit-suffix letter (e.g. "B" misread as
+# "8": "15.5B" -> "15.58", "9B" -> "98"). Used to recover the suffix when a
+# series is otherwise dominated by it.
+_SUFFIX_DIGIT_CONFUSIONS = {"8": "b"}
+_MIN_DOMINANT_SUFFIX_COUNT = 2  # ignore a single stray suffix as noise
+
+
+def _normalize_number_text(text):
+    text = text.replace(",", ".").strip().lower()
+    # collapse a stray duplicate decimal separator, e.g. "10,.4B" -> "10..4b" -> "10.4b"
+    return re.sub(r"\.{2,}", ".", text)
+
+
+def _parse_number_text(text):
+    """Parse a normalized OCR token into a float, honoring k/m/b/% suffixes."""
+    for suffix, multiplier in _SUFFIX_MULTIPLIERS.items():
+        if text.endswith(suffix):
+            try:
+                return float(text[: -len(suffix)].strip()) * multiplier
+            except ValueError:
+                return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
 def texts_to_numbers(texts):
+    """Parse a series of OCR axis-label tokens (e.g. one axis' tick labels) into floats.
+
+    Series-aware: if most tokens share a unit suffix (k/m/b/%), tokens ending
+    in a digit OCR commonly confuses with that suffix's letter (e.g. "8" for
+    "B") are corrected to use it, instead of being parsed as a wildly
+    different plain number or dropped as unparsable.
+    """
+    normalized = [_normalize_number_text(t) for t in texts]
+
+    suffix_counts = {}
+    for text in normalized:
+        for suffix in _SUFFIX_MULTIPLIERS:
+            if text.endswith(suffix):
+                suffix_counts[suffix] = suffix_counts.get(suffix, 0) + 1
+                break
+    dominant_suffix = max(suffix_counts, key=suffix_counts.get, default=None)
+    if dominant_suffix and suffix_counts[dominant_suffix] < _MIN_DOMINANT_SUFFIX_COUNT:
+        dominant_suffix = None
+
     numbers = []
-    for text in texts:
-        text = text.replace(",", ".").strip().lower()
-        try:
-            if text.endswith("k"):
-                text = text[:-1].strip()
-                num = float(text) * 1e3
-            elif text.endswith("m"):
-                text = text[:-1].strip()
-                num = float(text) * 1e6
-            elif text.endswith("b"):
-                text = text[:-1].strip()
-                num = float(text) * 1e9
-            elif text.endswith("%"):
-                text = text[:-1].strip()
-                num = float(text) / 100.0
-            else:
-                num = float(text)
-            numbers.append(num)
-        except ValueError:
-            numbers.append(None)
+    for text in normalized:
+        if (
+            dominant_suffix
+            and not text.endswith(dominant_suffix)
+            and _SUFFIX_DIGIT_CONFUSIONS.get(text[-1:]) == dominant_suffix
+        ):
+            corrected = _parse_number_text(text[:-1] + dominant_suffix)
+            if corrected is not None:
+                numbers.append(corrected)
+                continue
+        numbers.append(_parse_number_text(text))
     return numbers
 
 
