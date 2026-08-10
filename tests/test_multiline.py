@@ -135,10 +135,14 @@ class TestMatchSeriesToLegend(TestCase):
         self.assertEqual(names, ["Red", "Blue", None])
 
     def test_too_far_is_unmatched(self):
+        # Fewer legend entries than series: unmatched series stay too far and are
+        # left as None rather than forced onto a distant color.
         names = match_series_to_legend(
-            [(0, 0, 200)], [{"name": "Far", "color": (255, 255, 255)}], max_distance=10
+            [(0, 0, 200), (0, 255, 0)],
+            [{"name": "Far", "color": (255, 255, 255)}],
+            max_distance=10,
         )
-        self.assertEqual(names, [None])
+        self.assertEqual(names, [None, None])
 
     def test_each_legend_entry_used_at_most_once(self):
         # Two series both within range of the same single legend entry: only the
@@ -147,3 +151,30 @@ class TestMatchSeriesToLegend(TestCase):
         legend_entries = [{"name": "Red", "color": (0, 0, 200)}]
         names = match_series_to_legend(series_colors, legend_entries)
         self.assertEqual(names, [None, "Red"])
+
+    def test_full_coverage_when_legend_has_enough_entries(self):
+        # len(legend_entries) >= len(series_colors): every series must be
+        # assigned, even past max_distance, choosing the globally minimal-
+        # distance pairing rather than leaving any series unmatched.
+        series_colors = [(0, 0, 200), (200, 0, 0)]
+        legend_entries = [
+            {"name": "Red", "color": (0, 0, 190)},
+            {"name": "Blue", "color": (190, 0, 0)},
+            {"name": "Unused", "color": (0, 200, 0)},
+        ]
+        names = match_series_to_legend(series_colors, legend_entries, max_distance=1)
+        self.assertEqual(names, ["Red", "Blue"])
+
+    def test_full_coverage_minimizes_total_distance(self):
+        # Both series are nearest to "A"; a per-series-nearest-first pick would
+        # give one of them "A" and leave the other stuck with the far entry "C"
+        # (distance 90). The minimal-total-distance assignment instead routes
+        # series 1 to "B" (distance 6), which is far cheaper overall.
+        series_colors = [(0, 0, 100), (0, 0, 104)]
+        legend_entries = [
+            {"name": "A", "color": (0, 0, 101)},
+            {"name": "B", "color": (0, 0, 110)},
+            {"name": "C", "color": (0, 0, 190)},
+        ]
+        names = match_series_to_legend(series_colors, legend_entries)
+        self.assertEqual(names, ["A", "B"])
