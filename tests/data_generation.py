@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -243,6 +244,20 @@ def _quarterly_step_series(dates, start_value, volatility, avg_quarterly_return)
     return pd.Series(quarterly_values, index=unique_quarters).reindex(quarters).values
 
 
+def _crossing_actual_series(dates, level, amplitude, n_crossings, noise_scale):
+    """
+    A continuous line that sweeps a fixed-count sine around `level`, crossing it
+    close to `n_crossings` times over `dates` -- an explicit, comparable
+    alternative to `simulate_mean_reverting_series`'s random walk (whose crossing
+    count is an emergent, unmeasured property of noise), for stress-testing
+    extraction as a function of crossing density (docs/series-gaps-diagnosis.md).
+    """
+    t = np.linspace(0, 1, len(dates))
+    swing = amplitude * np.sin(np.pi * n_crossings * t)
+    noise = np.random.normal(scale=noise_scale, size=len(dates))
+    return level + swing + noise
+
+
 def generate_scrab_style_chart(
     start_date,
     end_date,
@@ -250,6 +265,7 @@ def generate_scrab_style_chart(
     n_step_series=2,
     log_scale=False,
     dense_crossing=False,
+    n_crossings: Optional[int] = None,
     output_csv="simulated_scrab.csv",
     output_image="simulated_scrab.png",
 ):
@@ -268,10 +284,27 @@ def generate_scrab_style_chart(
     over the whole date range -- the shape of data/scrab/nvo-pt.png, avgo-pt.png
     and panw-pt.png, which is what exposed the gaps and wrong values these tests
     guard against (see chart_extraction._is_same_trajectory and
-    geometry.cut_chart_area).
+    geometry.cut_chart_area). `n_crossings` selects a third mode: the actual line
+    sweeps a fixed-count sine around the step band instead of a random walk, so
+    the crossing count is an explicit, comparable parameter across fixtures
+    rather than an emergent property of noise (see _crossing_actual_series).
     """
     trend = np.random.choice([-1, 1])
-    if dense_crossing:
+    if n_crossings is not None:
+        dates = pd.date_range(start=start_date, end=end_date, freq="B")
+        actual = pd.DataFrame(
+            {
+                "date": dates,
+                "value": _crossing_actual_series(
+                    dates,
+                    level=start_value,
+                    amplitude=0.15 * start_value,
+                    n_crossings=n_crossings,
+                    noise_scale=0.0008 * start_value,
+                ),
+            }
+        )
+    elif dense_crossing:
         # A plain random walk's variance grows without bound over a multi-year
         # range and would eventually carry it away from the steps for good (only
         # crossing near the start) -- mean-reverting around the step band's
@@ -295,14 +328,35 @@ def generate_scrab_style_chart(
     combined = actual[["date"]].copy()
     combined["actual"] = actual["value"].values
 
+    # A tight band (dense_crossing or n_crossings) keeps the step levels close to
+    # the actual line's own level throughout, so crossings actually happen; the
+    # default band sits comfortably above it instead.
+    tight_band = dense_crossing or n_crossings is not None
     step_values = []
     for i in range(n_step_series):
-        multiplier = (0.85 + 0.1 * i) if dense_crossing else (1.3 + 0.4 * i)
+        if n_crossings is not None:
+            # Centered near, and barely drifting from, start_value -- the sine
+            # sweep's own center -- so it stays inside the swing's amplitude for
+            # the whole range and the requested crossing count is actually
+            # realized, rather than the step wandering (via drift/volatility)
+            # out of the swing's reach the way dense_crossing's random walk can.
+            # A little quarter-to-quarter wiggle (not zero) keeps the step from
+            # sitting at the exact same pixel row for the WHOLE chart: a
+            # perfectly flat line has ink at every column of that one row, which
+            # extract_chart's own grid-row heuristic (>50% of columns inked)
+            # then misreads as a background gridline and erases outright.
+            multiplier, volatility, avg_quarterly_return = 1.025, 0.01, 0.0
+        elif tight_band:
+            multiplier = 0.85 + 0.1 * i
+            volatility, avg_quarterly_return = 0.02, 2e-3 * trend
+        else:
+            multiplier = 1.3 + 0.4 * i
+            volatility, avg_quarterly_return = 0.03, 3e-2 * trend
         level = _quarterly_step_series(
             dates,
             start_value * multiplier,
-            volatility=0.02 if dense_crossing else 0.03,
-            avg_quarterly_return=2e-3 * trend if dense_crossing else 3e-2 * trend,
+            volatility=volatility,
+            avg_quarterly_return=avg_quarterly_return,
         )
         combined[f"estimate{i + 1}"] = level
         step_values.append(level)
@@ -371,6 +425,7 @@ if __name__ == "__main__":
         multiline_path,
         scrab_style_path,
         dense_crossing_path,
+        crossing_multiline_path,
     ) = (
         os.path.join(TEST_DATA_DIR, "linear_scaled"),
         os.path.join(TEST_DATA_DIR, "log_scaled"),
@@ -378,6 +433,7 @@ if __name__ == "__main__":
         os.path.join(TEST_DATA_DIR, "multiline"),
         os.path.join(TEST_DATA_DIR, "scrab_style"),
         os.path.join(TEST_DATA_DIR, "dense_crossing"),
+        os.path.join(TEST_DATA_DIR, "crossing_multiline"),
     )
     os.makedirs(linear_path, exist_ok=True)
     os.makedirs(log_path, exist_ok=True)
@@ -385,6 +441,7 @@ if __name__ == "__main__":
     os.makedirs(multiline_path, exist_ok=True)
     os.makedirs(scrab_style_path, exist_ok=True)
     os.makedirs(dense_crossing_path, exist_ok=True)
+    os.makedirs(crossing_multiline_path, exist_ok=True)
 
     np.random.seed(20260801)
     generate_multiline_chart(
@@ -454,4 +511,22 @@ if __name__ == "__main__":
             dense_crossing=True,
             output_csv=os.path.join(dense_crossing_path, f"dense_crossing_{i}.csv"),
             output_image=os.path.join(dense_crossing_path, f"dense_crossing_{i}.png"),
+        )
+
+    # Same legend + step-line shape as dense_crossing, but with the crossing
+    # count as an explicit, comparable parameter (see _crossing_actual_series)
+    # instead of an emergent property of a random walk -- lets extraction quality
+    # be measured as a function of crossing density (docs/series-gaps-diagnosis.md).
+    for i, n_crossings in enumerate([2, 5, 10, 20]):
+        generate_scrab_style_chart(
+            start_date="2022-01-01",
+            end_date="2025-06-30",
+            n_step_series=1,
+            n_crossings=n_crossings,
+            output_csv=os.path.join(
+                crossing_multiline_path, f"crossing_multiline_{i}.csv"
+            ),
+            output_image=os.path.join(
+                crossing_multiline_path, f"crossing_multiline_{i}.png"
+            ),
         )

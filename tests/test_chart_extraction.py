@@ -25,6 +25,7 @@ IN_AREA_TEXT_DIR = os.path.join(TEST_DATA_DIR, "in_area_text")
 MULTILINE_DIR = os.path.join(TEST_DATA_DIR, "multiline")
 SCRAB_STYLE_DIR = os.path.join(TEST_DATA_DIR, "scrab_style")
 DENSE_CROSSING_DIR = os.path.join(TEST_DATA_DIR, "dense_crossing")
+CROSSING_MULTILINE_DIR = os.path.join(TEST_DATA_DIR, "crossing_multiline")
 REPO_ROOT = os.path.dirname(os.path.dirname(__file__))
 REAL_MULTILINE_DIR = os.path.join(REPO_ROOT, "data", "multiline")
 
@@ -785,6 +786,97 @@ class TestDenseCrossingExtraction(TestCase):
         for idx, expected in expected_results.items():
             with self.subTest(chart=idx):
                 image_path = os.path.join(DENSE_CROSSING_DIR, f"{idx}.png")
+                extraction = extract_chart(image_path)
+                n_expected = len(next(iter(expected.values())))
+                n_extracted = (
+                    len(extraction.time_series[0][1]) if extraction.time_series else 0
+                )
+                self.assertGreaterEqual(
+                    n_extracted,
+                    n_expected,
+                    f"{idx}: fewer series extracted than are in the chart",
+                )
+
+                extracted_by_date = {
+                    dt.date(): values for dt, values in extraction.time_series
+                }
+                expected_by_col = [
+                    {d: v[i] for d, v in expected.items()} for i in range(n_expected)
+                ]
+                used_series = set()
+                for col_idx, expected_col in enumerate(expected_by_col):
+                    best_idx, best_error, best_resolved_fraction = None, None, None
+                    for series_idx in range(n_extracted):
+                        if series_idx in used_series:
+                            continue
+                        got_col = {
+                            d: values[series_idx]
+                            for d, values in extracted_by_date.items()
+                        }
+                        common = [d for d in expected_col if got_col.get(d) is not None]
+                        if not common:
+                            continue
+                        error = float(
+                            np.mean(
+                                [
+                                    abs(got_col[d] - expected_col[d]) / expected_col[d]
+                                    for d in common
+                                ]
+                            )
+                        )
+                        if best_error is None or error < best_error:
+                            resolved = sum(v is not None for v in got_col.values())
+                            best_idx, best_error, best_resolved_fraction = (
+                                series_idx,
+                                error,
+                                resolved / len(got_col),
+                            )
+                    self.assertIsNotNone(
+                        best_idx, f"{idx}: no series matched csv column {col_idx}"
+                    )
+                    used_series.add(best_idx)
+                    self.assertLess(
+                        best_error,
+                        self.MAX_MEAN_REL_ERROR,
+                        f"{idx}: closest matching series for column {col_idx} is still far off",
+                    )
+                    self.assertGreater(
+                        best_resolved_fraction,
+                        self.MIN_RESOLVED_FRACTION,
+                        f"{idx}: closest matching series for column {col_idx} resolved too few columns",
+                    )
+
+
+class TestCrossingMultilineExtraction(TestCase):
+    """
+    End-to-end extraction of a legend-bearing chart where a continuous "Actual"
+    line and one quarterly step line cross a controlled, comparable number of
+    times (requested as 2 / 5 / 10 / 20 -- see
+    tests/data_generation._crossing_actual_series),
+    unlike dense_crossing's random-walk actual line whose crossing count is an
+    unmeasured property of noise. crossing_multiline_0 (only 2 crossings) is a
+    regression test in its own right: with few, widely-spaced crossings the two
+    lines linger close together for a long stretch each time, which used to
+    split the step line's anti-aliasing into a shade covering 40% of the width
+    that _is_same_trajectory's overlap gate could not reunite with the main
+    color (docs/series-gaps-diagnosis.md) -- a worse gap than any dense_crossing
+    fixture produces, even though it has far fewer crossings.
+
+    As in TestDenseCrossingExtraction, exact series-count equality isn't
+    asserted: an occasional un-merged duplicate shade of "Actual" itself (more
+    likely as crossing density rises) is a known, milder residual.
+    """
+
+    MAX_MEAN_REL_ERROR = 0.05
+    MIN_RESOLVED_FRACTION = 0.6
+
+    def test_every_line_is_recovered_at_every_crossing_density(self):
+        expected_results = _load_expected_results(CROSSING_MULTILINE_DIR)
+        self.assertTrue(expected_results, f"no fixtures in {CROSSING_MULTILINE_DIR}")
+
+        for idx, expected in expected_results.items():
+            with self.subTest(chart=idx):
+                image_path = os.path.join(CROSSING_MULTILINE_DIR, f"{idx}.png")
                 extraction = extract_chart(image_path)
                 n_expected = len(next(iter(expected.values())))
                 n_extracted = (
