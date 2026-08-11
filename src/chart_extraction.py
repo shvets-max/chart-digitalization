@@ -41,6 +41,18 @@ DEFAULT_DUPLICATE_MIN_OVERLAP_SPREAD = 0.3  # of width: shared columns must not 
 MIN_DUPLICATE_OVERLAP_COLUMNS = 15  # floor so a handful of columns can't pass on
 # fraction alone
 
+# Disjoint-shade merging (see _is_disjoint_shade) -- second path for a candidate
+# that _is_same_trajectory rejects for lack of shared columns, not disagreement
+# (docs/series-gaps-diagnosis.md)
+DEFAULT_DISJOINT_MAX_OVERLAP_FRACTION = 0.1  # of the SMALLER trajectory's own
+# resolved columns: above this there's enough shared evidence that
+# _is_same_trajectory's distance/spread judgement should be trusted instead, so
+# this path only ever fires where that one is structurally unable to decide
+DEFAULT_DISJOINT_COLOR_MERGE_DISTANCE = 65.0  # looser than cluster_ink_colors'
+# own discovery-time merge_distance (40): a complementary shade rejected by
+# discovery for sitting just past that bound is still the case this path exists
+# to catch
+
 
 def select_axis_tick_group(
     ids: list[list[int]], texts: list[str], parser: Callable[[list[str]], list]
@@ -562,6 +574,60 @@ def _is_same_trajectory(
     return float(np.median(diffs)) <= max_median_distance
 
 
+def _is_disjoint_shade(
+    rows_a,
+    colors_a,
+    rows_b,
+    colors_b,
+    max_color_distance,
+    max_overlap_fraction,
+    max_median_distance,
+):
+    """
+    Second path for merging a color candidate into an accepted group, for when
+    they share too few columns for `_is_same_trajectory`'s overlap-then-distance
+    test to judge at all (docs/series-gaps-diagnosis.md): a real complementary
+    anti-aliasing shade of the same line can resolve on columns almost entirely
+    disjoint from the main shade's -- e.g. a flat, fixed-row segment that renders
+    as one evenly-blended shade with no core-color pixel anywhere nearby -- which
+    is exactly the case `_is_same_trajectory`'s overlap-fraction gate structurally
+    can't tell apart from "not enough evidence".
+
+    Here color, not row agreement, is the discriminator: two truly unrelated
+    lines that cross would still leave a spread of overlapping columns near the
+    crossing (see `_is_same_trajectory`), so near-total column disjointness plus
+    a color close to an already-accepted shade is treated as one more shade of
+    that line rather than coincidence. `max_overlap_fraction` is deliberately
+    lower than `_is_same_trajectory`'s own overlap floor, so this path only fires
+    where that one is structurally unable to decide, not wherever it happens to
+    reject a real crossing between two different lines.
+    """
+    color_distance = float(
+        np.linalg.norm(
+            np.array(colors_a, dtype=float) - np.array(colors_b, dtype=float)
+        )
+    )
+    if color_distance > max_color_distance:
+        return False
+
+    overlap_idx = [
+        i
+        for i, (a, b) in enumerate(zip(rows_a, rows_b))
+        if a is not None and b is not None
+    ]
+    smaller_count = min(
+        sum(r is not None for r in rows_a), sum(r is not None for r in rows_b)
+    )
+    if smaller_count == 0:
+        return False
+    if len(overlap_idx) > max_overlap_fraction * smaller_count:
+        return False
+    if not overlap_idx:
+        return True  # no shared evidence to contradict a color-based merge
+    diffs = [abs(rows_a[i] - rows_b[i]) for i in overlap_idx]
+    return float(np.median(diffs)) <= max_median_distance
+
+
 def select_series_clusters(
     ink_clusters,
     grid_y_component_map,
@@ -572,6 +638,8 @@ def select_series_clusters(
     min_candidate_column_coverage=DEFAULT_MIN_CANDIDATE_COLUMN_COVERAGE,
     duplicate_median_distance=DEFAULT_DUPLICATE_MEDIAN_DISTANCE,
     duplicate_min_overlap_fraction=DEFAULT_DUPLICATE_MIN_OVERLAP_FRACTION,
+    disjoint_max_overlap_fraction=DEFAULT_DISJOINT_MAX_OVERLAP_FRACTION,
+    disjoint_color_merge_distance=DEFAULT_DISJOINT_COLOR_MERGE_DISTANCE,
     near_gray_saturation_threshold=NEAR_GRAY_SATURATION_THRESHOLD,
     near_gray_min_brightness=NEAR_GRAY_MIN_BRIGHTNESS,
 ):
@@ -601,6 +669,14 @@ def select_series_clusters(
     whatever columns that particular shade happens to win), so gating candidacy on
     it before merging would throw those shades away before they ever got a chance
     to reunite.
+
+    A candidate that `_is_same_trajectory` rejects only for lack of shared columns
+    (not disagreement) gets a second chance via `_is_disjoint_shade`: a real
+    complementary shade of an already-accepted line can land on columns almost
+    entirely disjoint from it (see docs/series-gaps-diagnosis.md), which is the
+    one case `_is_same_trajectory`'s overlap gate can't tell apart from "two
+    coincidentally-similar-colored but different lines" -- so this path leans on
+    color closeness instead of row agreement to decide.
 
     Returns a list of {"color", "mask", "rows", ...} ordered by descending
     resolved-column count.
@@ -644,6 +720,15 @@ def select_series_clusters(
                     g["rows"],
                     duplicate_median_distance,
                     duplicate_min_overlap_fraction,
+                )
+                or _is_disjoint_shade(
+                    candidate["rows"],
+                    candidate["color"],
+                    g["rows"],
+                    g["color"],
+                    disjoint_color_merge_distance,
+                    disjoint_max_overlap_fraction,
+                    duplicate_median_distance,
                 )
             ),
             None,
