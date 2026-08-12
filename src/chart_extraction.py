@@ -11,6 +11,7 @@ from src.function import FunctionBase, Logarithmic
 from src.geometry import cluster_data, cut_chart_area, get_column_bboxes, get_row_bboxes
 from src.multiline import (
     cluster_ink_colors,
+    default_legend_search_area,
     find_legend_entries,
     match_series_to_legend,
 )
@@ -150,6 +151,9 @@ class ChartExtraction:
     x_is_datetime: bool = False
     y_is_log: bool = False
     series_names: list = field(default_factory=list)  # legend name per series, or None
+    legend_area: Optional[tuple[int, int, int, int]] = None  # (x1, y1, x2, y2) actually
+    # searched for a legend -- the user-highlighted area if one was given, else the
+    # default top-left corner (see multiline.default_legend_search_area)
 
     def x_value_at(self, x_pixel: float):
         """Axis value (datetime or number) at an image x coordinate."""
@@ -243,8 +247,16 @@ def build_axis_ticks(
     return {"x": x_ticks, "y": y_ticks}
 
 
-def extract_chart(image_path: str) -> ChartExtraction:
-    """Digitalize a chart image: the series plus the pixel geometry to draw it."""
+def extract_chart(
+    image_path: str, legend_area: Optional[tuple[int, int, int, int]] = None
+) -> ChartExtraction:
+    """
+    Digitalize a chart image: the series plus the pixel geometry to draw it.
+
+    `legend_area` (left, top, right, bottom) restricts legend detection to a
+    user-highlighted region, e.g. when the legend sits somewhere other than the
+    default top-left corner. Omit it to search the default corner.
+    """
     # Load image
     if not os.path.exists(image_path):
         raise FileNotFoundError(f"Image file not found: {image_path}")
@@ -324,8 +336,14 @@ def extract_chart(image_path: str) -> ChartExtraction:
     # piece together into a spurious "series" of their own (see
     # multiline.find_legend_entries). Its bbox is excluded from the ink mask used
     # for color clustering below.
+    chart_bounds = (x_offset, y_offset, x2, y2)
+    legend_search_area = (
+        legend_area
+        if legend_area is not None
+        else default_legend_search_area(chart_bounds)
+    )
     legend_entries = find_legend_entries(
-        texts, bboxes, (x_offset, y_offset, x2, y2), img
+        texts, bboxes, chart_bounds, img, search_area=legend_search_area
     )
     ink_mask = chart_area.astype(bool)
     for entry in legend_entries:
@@ -394,6 +412,7 @@ def extract_chart(image_path: str) -> ChartExtraction:
         x_is_datetime=bool(time_series) and isinstance(time_series[0][0], datetime),
         y_is_log=isinstance(y_scale, Logarithmic),
         series_names=series_names,
+        legend_area=tuple(int(round(v)) for v in legend_search_area),
     )
 
 

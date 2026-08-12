@@ -25,6 +25,7 @@ const state = {
   lastView: { width: 0, height: 0 },
   isPanning: false,
   panPointerId: null,
+  legendSelect: { active: false, dragging: false, pointerId: null, start: null, current: null },
 };
 
 const el = (id) => document.getElementById(id);
@@ -94,12 +95,38 @@ async function showChart(chart) {
   renderBadges(chart);
   renderSeriesToggles(chart);
   renderTable(chart);
+  updateLegendHint(chart);
   el("scale-hint").textContent = chart.axes.y_is_log
     ? "Values read off a logarithmic y-axis."
     : "Values read off a linear y-axis.";
 
   await refreshTicks();
   render();
+}
+
+/* Refresh from a re-extraction (e.g. after picking a new legend area) without
+   reloading the image or resetting zoom/pan -- only the chart data changed. */
+async function updateChart(chart) {
+  state.chart = chart;
+  renderBadges(chart);
+  renderSeriesToggles(chart);
+  renderTable(chart);
+  updateLegendHint(chart);
+  el("scale-hint").textContent = chart.axes.y_is_log
+    ? "Values read off a logarithmic y-axis."
+    : "Values read off a linear y-axis.";
+
+  await refreshTicks();
+  render();
+}
+
+function updateLegendHint(chart) {
+  const hint = el("legend-area-hint");
+  if (!chart.legend_matches) {
+    hint.textContent = "No legend matched in this area. Drag a rectangle over the legend to search there.";
+  } else {
+    hint.textContent = `${chart.legend_matches} series name${chart.legend_matches === 1 ? "" : "s"} matched from the legend.`;
+  }
 }
 
 function renderBadges(chart) {
@@ -129,17 +156,21 @@ function renderSeriesToggles(chart) {
       </button>`,
     )
     .join("");
+}
 
-  container.addEventListener("click", (event) => {
-    const button = event.target.closest(".series-toggle");
-    if (!button) return;
-    const index = Number(button.dataset.index);
-    const pressed = button.getAttribute("aria-pressed") === "true";
-    button.setAttribute("aria-pressed", String(!pressed));
-    if (pressed) state.hiddenSeries.add(index);
-    else state.hiddenSeries.delete(index);
-    render();
-  });
+/* Bound once in bindControls (not here): renderSeriesToggles rebuilds the
+   container's innerHTML on every chart update, but the container element
+   itself persists, so a listener added here would accumulate one copy per
+   update instead of being replaced. */
+function handleSeriesToggleClick(event) {
+  const button = event.target.closest(".series-toggle");
+  if (!button) return;
+  const index = Number(button.dataset.index);
+  const pressed = button.getAttribute("aria-pressed") === "true";
+  button.setAttribute("aria-pressed", String(!pressed));
+  if (pressed) state.hiddenSeries.add(index);
+  else state.hiddenSeries.delete(index);
+  render();
 }
 
 function formatNumber(value) {
@@ -227,6 +258,7 @@ function render() {
 
   if (el("opt-grid").value !== "off") drawGrid(view);
   if (el("opt-area").checked) drawPlotArea(view);
+  if (el("opt-legend-area").checked) drawLegendArea(view);
   if (el("opt-scale").checked) drawNumericScale(view);
   if (el("opt-series").checked) drawSeries(view);
 }
@@ -242,6 +274,45 @@ function drawPlotArea(view) {
     view.x(a.x2 - a.x1), view.y(a.y2 - a.y1),
   );
   ctx.restore();
+}
+
+function strokeRectArea(view, area, color, dash, fillAlpha = 0) {
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash(dash);
+  const x = view.x(area.x1), y = view.y(area.y1);
+  const w = view.x(area.x2 - area.x1), h = view.y(area.y2 - area.y1);
+  if (fillAlpha > 0) {
+    ctx.globalAlpha = fillAlpha;
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y, w, h);
+    ctx.globalAlpha = 1;
+  }
+  ctx.strokeRect(x, y, w, h);
+  ctx.restore();
+}
+
+/* The area currently searched for a legend (default top-left corner unless the
+   user highlighted one), plus a live preview of the rectangle being dragged. */
+function drawLegendArea(view) {
+  if (state.chart.legend_area) {
+    strokeRectArea(view, state.chart.legend_area, cssVar("--series-2"), [6, 3]);
+  }
+  const drag = state.legendSelect;
+  if (drag.dragging && drag.start && drag.current) {
+    const area = normalizedDragArea(drag.start, drag.current);
+    strokeRectArea(view, area, cssVar("--series-1"), [4, 3], 0.12);
+  }
+}
+
+function normalizedDragArea(start, current) {
+  return {
+    x1: Math.min(start.x, current.x),
+    y1: Math.min(start.y, current.y),
+    x2: Math.max(start.x, current.x),
+    y2: Math.max(start.y, current.y),
+  };
 }
 
 function drawGrid(view) {
@@ -439,6 +510,7 @@ function handleWheelZoom(event) {
 }
 
 function startPan(event) {
+  if (state.legendSelect.active) return startLegendDrag(event);
   if (state.zoom.scale <= 1) return;
   state.isPanning = true;
   state.panPointerId = event.pointerId;
@@ -457,6 +529,7 @@ function panTo(event) {
 }
 
 function endPan(event) {
+  if (state.legendSelect.dragging) return finishLegendDrag(event);
   if (!state.isPanning) return;
   state.isPanning = false;
   canvas.classList.remove("is-panning");
@@ -474,6 +547,83 @@ function setFullscreen(on) {
 
 function toggleFullscreen() {
   setFullscreen(!el("result-panel").classList.contains("is-fullscreen"));
+}
+
+/* Client (viewport) coordinates -> original-image pixel coordinates, undoing
+   both the zoom/pan transform and the CSS-to-natural-size scale. Used to turn
+   a legend-area drag into the same pixel space as chart_area/legend_area. */
+function imagePointAt(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  const zoom = state.zoom;
+  const userX = (clientX - rect.left - zoom.tx) / zoom.scale;
+  const userY = (clientY - rect.top - zoom.ty) / zoom.scale;
+  return { x: userX / state.viewScale, y: userY / state.viewScale };
+}
+
+/* ------------------------------------------------------------- legend area */
+
+function setLegendSelectMode(active) {
+  state.legendSelect.active = active;
+  canvas.classList.toggle("is-selecting-legend", active);
+  el("legend-area-select").setAttribute("aria-pressed", String(active));
+  el("legend-area-select").textContent = active ? "Drag over the legend…" : "Select area…";
+}
+
+function startLegendDrag(event) {
+  const select = state.legendSelect;
+  select.dragging = true;
+  select.pointerId = event.pointerId;
+  select.start = imagePointAt(event.clientX, event.clientY);
+  select.current = select.start;
+  canvas.setPointerCapture(event.pointerId);
+}
+
+function updateLegendDrag(event) {
+  state.legendSelect.current = imagePointAt(event.clientX, event.clientY);
+  render();
+}
+
+async function finishLegendDrag(event) {
+  const select = state.legendSelect;
+  const { start, current, pointerId } = select;
+  select.dragging = false;
+  select.start = select.current = null;
+  if (pointerId !== null) canvas.releasePointerCapture(pointerId);
+  setLegendSelectMode(false);
+
+  // Too small to be a deliberate selection (e.g. a stray click): leave the
+  // current legend area untouched instead of searching a sliver.
+  if (!start || !current || Math.abs(current.x - start.x) < 6 || Math.abs(current.y - start.y) < 6) {
+    render();
+    return;
+  }
+  await applyLegendArea(normalizedDragArea(start, current));
+}
+
+async function applyLegendArea(area) {
+  await sendLegendArea(area, "Searching the highlighted area for a legend…");
+}
+
+async function resetLegendArea() {
+  await sendLegendArea(null, "Resetting to the default legend area…");
+}
+
+async function sendLegendArea(area, busyMessage) {
+  if (!state.chart) return;
+  setStatus(busyMessage, "busy");
+  try {
+    const response = await fetch(`/api/charts/${state.chart.id}/legend-area`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(area),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || response.statusText);
+    await updateChart(payload);
+    setStatus(`Extracted ${countValues(payload)} points from ${payload.filename}.`);
+  } catch (error) {
+    setStatus(error.message || "Legend search failed.", "error");
+  }
 }
 
 /* ------------------------------------------------------------------ hover */
@@ -516,6 +666,7 @@ function showTooltip(index, clientX) {
 
 function handlePointerMove(event) {
   if (!state.chart) return;
+  if (state.legendSelect.dragging) return updateLegendDrag(event);
   if (state.isPanning) return panTo(event);
   const index = pointIndexAt(event.clientX);
   if (index === null) return handlePointerLeave();
@@ -618,7 +769,7 @@ function bindControls() {
     uploadImage(event.dataTransfer.files[0]);
   });
 
-  for (const id of ["opt-series", "opt-area"]) {
+  for (const id of ["opt-series", "opt-area", "opt-legend-area"]) {
     el(id).addEventListener("change", render);
   }
   el("opt-dim").addEventListener("input", () => {
@@ -628,6 +779,13 @@ function bindControls() {
   for (const id of ["opt-grid", "opt-xticks", "opt-yticks", "opt-scale"]) {
     el(id).addEventListener("input", handleGridChange);
   }
+
+  el("series-toggles").addEventListener("click", handleSeriesToggleClick);
+
+  el("legend-area-select").addEventListener("click", () => {
+    setLegendSelectMode(!state.legendSelect.active);
+  });
+  el("legend-area-reset").addEventListener("click", resetLegendArea);
 
   canvas.addEventListener("pointermove", handlePointerMove);
   canvas.addEventListener("pointerleave", handlePointerLeave);
