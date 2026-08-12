@@ -149,45 +149,127 @@ def _swatch_color(color_img: np.ndarray, first_token_box: Box) -> Optional[Color
     return _dominant_ink_color(color_img, (x_start, top, x_end, bottom))
 
 
+def default_legend_search_area(chart_area: Box) -> Box:
+    """
+    Region to search for a legend when the caller hasn't highlighted one: the
+    corner of `chart_area` where a legend conventionally sits, sized by
+    LEGEND_LEFT_FRACTION / LEGEND_TOP_FRACTION.
+    """
+    x1, y1, x2, y2 = chart_area
+    width, height = x2 - x1, y2 - y1
+    return (
+        x1,
+        y1,
+        x1 + LEGEND_LEFT_FRACTION * width,
+        y1 + LEGEND_TOP_FRACTION * height,
+    )
+
+
+def _select_legend_candidates(
+    texts: list[str], bboxes: list[Box], search_area: Box
+) -> tuple[list[int], list[Box]]:
+    """
+    OCR token indices (into `texts`/`bboxes`) and their boxes, restricted to
+    those fully inside `search_area`. This runs BEFORE grouping into rows:
+    get_row_bboxes groups purely by vertical overlap with no horizontal-
+    proximity check, so a distant token at the same height (a scale toggle
+    button, a y-axis tick label on the far side of the chart) would otherwise
+    merge into the same "row" as a real legend entry it has nothing to do
+    with, producing a row that spans most of the chart's width.
+    """
+    x1, y1, x2, y2 = search_area
+    candidate_idx = [
+        i
+        for i, box in enumerate(bboxes)
+        if x1 <= box[0]
+        and box[2] <= x2
+        and y1 <= box[1]
+        and box[3] <= y2
+        and box[3] - box[1] >= MIN_LEGEND_TOKEN_HEIGHT  # drop OCR slivers (e.g. a
+        # 1px-tall misread of the axis spine at the chart's edge), not real text
+    ]
+    return candidate_idx, [bboxes[i] for i in candidate_idx]
+
+
+def _legend_entry_from_row(
+    row_texts: list[str], box_group: list[Box], color_img: np.ndarray
+) -> Optional[dict]:
+    """
+    Turn one legend row -- OCR tokens already ordered left to right -- into a
+    {"name", "color", "bbox"} entry, or None if the row is actually a tick-label
+    row, or no name/color survives it.
+    """
+    row_bbox = _union_bbox(box_group)
+    row_texts, box_group = list(row_texts), list(box_group)
+
+    # Drop a leading legend bullet/marker icon: dashboard legends draw a small
+    # colored dot before the name, which OCR reads as garbage with no
+    # alphanumeric content.
+    while row_texts and not any(ch.isalnum() for ch in row_texts[0]):
+        row_texts, box_group = row_texts[1:], box_group[1:]
+    if not row_texts:
+        return None
+
+    numeric_flags = [_is_numeric_token(t) for t in row_texts]
+    if sum(numeric_flags) > 0.5 * len(row_texts):
+        return None  # looks like a tick-label row, not a legend
+
+    # Drop the trailing current-value badge (e.g. "2.16B") and anything after
+    # it in the row: a "Lin"/"Log" scale-toggle control can share the legend's
+    # top row and would otherwise be read as part of the name.
+    name_texts, name_boxes = list(row_texts), list(box_group)
+    last_numeric = next(
+        (i for i in range(len(numeric_flags) - 1, -1, -1) if numeric_flags[i]),
+        None,
+    )
+    if last_numeric is not None:
+        name_texts, name_boxes = name_texts[:last_numeric], name_boxes[:last_numeric]
+    if not name_texts:
+        return None
+    name = " ".join(name_texts).strip()
+
+    color = _dominant_ink_color(color_img, _union_bbox(name_boxes))
+    if color is None or not _is_saturated(color):
+        swatch = _swatch_color(color_img, name_boxes[0])
+        if swatch is not None:
+            color = swatch
+    if color is None:
+        return None
+
+    return {"name": name, "color": color, "bbox": row_bbox}
+
+
 def find_legend_entries(
-    texts: list[str], bboxes: list[Box], chart_area: Box, color_img: np.ndarray
+    texts: list[str],
+    bboxes: list[Box],
+    chart_area: Box,
+    color_img: np.ndarray,
+    search_area: Optional[Box] = None,
 ) -> list[dict]:
     """
-    Detect legend rows in the top-left of the chart area: each row is a
-    left-to-right run of OCR tokens forming a series name, optionally followed by
-    a trailing value (e.g. "NOW: EBITDA (TTM)   2.16B"). A row's color is the
-    label text's own pixel color when it is saturated (dashboard-style legends,
-    where the label is colored to match its line), else a swatch sampled
-    immediately to its left (matplotlib's default black-text-plus-icon legend).
+    Detect legend rows inside `search_area`: each row is a left-to-right run of
+    OCR tokens forming a series name, optionally followed by a trailing value
+    (e.g. "NOW: EBITDA (TTM)   2.16B"). A row's color is the label text's own
+    pixel color when it is saturated (dashboard-style legends, where the label
+    is colored to match its line), else a swatch sampled immediately to its
+    left (matplotlib's default black-text-plus-icon legend).
+
+    `search_area` defaults to the chart's top-left corner (see
+    default_legend_search_area) when not given; pass one explicitly (e.g. a
+    user-highlighted region) to look elsewhere.
 
     Returns a list of {"name": str, "color": (b, g, r), "bbox": (left, top, right,
     bottom)} ordered top to bottom. `bbox` is the whole row (name and any trailing
     value), useful for excluding legend ink from series color detection.
     """
-    x1, y1, x2, y2 = chart_area
-    width, height = x2 - x1, y2 - y1
+    if search_area is None:
+        search_area = default_legend_search_area(chart_area)
 
-    # Restrict to the corner where a legend conventionally sits BEFORE grouping
-    # into rows. get_row_bboxes groups purely by vertical overlap with no
-    # horizontal-proximity check, so a distant token at the same height (a scale
-    # toggle button, a y-axis tick label on the far side of the chart) would
-    # otherwise merge into the same "row" as a real legend entry it has nothing
-    # to do with, producing a row that spans most of the chart's width.
-    region_right = x1 + LEGEND_LEFT_FRACTION * width
-    region_bottom = y1 + LEGEND_TOP_FRACTION * height
-    candidate_idx = [
-        i
-        for i, box in enumerate(bboxes)
-        if x1 <= box[0]
-        and box[2] <= region_right
-        and y1 <= box[1]
-        and box[3] <= region_bottom
-        and box[3] - box[1] >= MIN_LEGEND_TOKEN_HEIGHT  # drop OCR slivers (e.g. a
-        # 1px-tall misread of the axis spine at the chart's edge), not real text
-    ]
+    candidate_idx, candidate_boxes = _select_legend_candidates(
+        texts, bboxes, search_area
+    )
     if not candidate_idx:
         return []
-    candidate_boxes = [bboxes[i] for i in candidate_idx]
 
     local_ids, rows = get_row_bboxes(candidate_boxes)
     entries = []
@@ -195,54 +277,14 @@ def find_legend_entries(
         order = sorted(range(len(local_id_group)), key=lambda k: box_group[k][0])
         id_group = [candidate_idx[local_id_group[k]] for k in order]
         box_group = [box_group[k] for k in order]
-        row_bbox = _union_bbox(box_group)
-        top = row_bbox[1]
-
         row_texts = [texts[i] for i in id_group]
 
-        # Drop a leading legend bullet/marker icon: dashboard legends draw a small
-        # colored dot before the name, which OCR reads as garbage with no
-        # alphanumeric content.
-        while row_texts and not any(ch.isalnum() for ch in row_texts[0]):
-            row_texts, box_group = row_texts[1:], box_group[1:]
-        if not row_texts:
-            continue
+        entry = _legend_entry_from_row(row_texts, box_group, color_img)
+        if entry is not None:
+            entries.append(entry)
 
-        numeric_flags = [_is_numeric_token(t) for t in row_texts]
-        if sum(numeric_flags) > 0.5 * len(row_texts):
-            continue  # looks like a tick-label row, not a legend
-
-        # Drop the trailing current-value badge (e.g. "2.16B") and anything after
-        # it in the row: a "Lin"/"Log" scale-toggle control can share the
-        # legend's top row and would otherwise be read as part of the name.
-        name_texts, name_boxes = list(row_texts), list(box_group)
-        last_numeric = next(
-            (i for i in range(len(numeric_flags) - 1, -1, -1) if numeric_flags[i]),
-            None,
-        )
-        if last_numeric is not None:
-            name_texts, name_boxes = (
-                name_texts[:last_numeric],
-                name_boxes[:last_numeric],
-            )
-        if not name_texts:
-            continue
-        name = " ".join(name_texts).strip()
-
-        color = _dominant_ink_color(color_img, _union_bbox(name_boxes))
-        if color is None or not _is_saturated(color):
-            swatch = _swatch_color(color_img, name_boxes[0])
-            if swatch is not None:
-                color = swatch
-        if color is None:
-            continue
-
-        entries.append({"name": name, "color": color, "bbox": row_bbox, "top": top})
-
-    entries.sort(key=lambda e: e["top"])
-    return [
-        {"name": e["name"], "color": e["color"], "bbox": e["bbox"]} for e in entries
-    ]
+    entries.sort(key=lambda e: e["bbox"][1])
+    return entries
 
 
 def match_series_to_legend(

@@ -146,6 +146,7 @@ main { max-width: 1180px; margin: 0 auto; display: grid; gap: 20px; }
 #overlay-canvas { display: block; width: 100%; height: auto; touch-action: none; }
 #overlay-canvas.is-zoomed { cursor: grab; }
 #overlay-canvas.is-panning { cursor: grabbing; }
+#overlay-canvas.is-selecting-legend { cursor: crosshair; }
 
 .zoom-controls {
   position: absolute;
@@ -249,6 +250,10 @@ main { max-width: 1180px; margin: 0 auto; display: grid; gap: 20px; }
 .slider output { float: right; color: var(--text-primary); font-variant-numeric: tabular-nums; }
 .slider[hidden] { display: none; }
 .hint { margin: 0; color: var(--text-muted); font-size: 12px; }
+
+.button-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.button-row .button { flex: 1 1 auto; padding: 6px 10px; font-size: 13px; }
+.button[aria-pressed="true"] { background: var(--series-1); border-color: var(--series-1); color: #fff; }
 
 .series-toggles { display: grid; gap: 6px; }
 .series-toggle {

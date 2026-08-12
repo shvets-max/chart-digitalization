@@ -8,10 +8,12 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
 from threading import Lock
+from typing import Optional
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from src.chart_extraction import ChartExtraction, build_axis_ticks, extract_chart
 
@@ -29,6 +31,15 @@ app = FastAPI(
     "positioned so it can be drawn back on the original picture.",
     version="1.0.0",
 )
+
+
+class LegendAreaBody(BaseModel):
+    """User-highlighted legend region, in original-image pixel coordinates."""
+
+    x1: float
+    y1: float
+    x2: float
+    y2: float
 
 
 @dataclass
@@ -115,6 +126,31 @@ def _series_payload(extraction: ChartExtraction) -> list[dict]:
     return series
 
 
+def _extract_from_bytes(
+    image_bytes: bytes,
+    suffix: str,
+    legend_area: Optional[tuple[float, float, float, float]] = None,
+    label: str = "upload",
+) -> ChartExtraction:
+    """Stage `image_bytes` to a temp file (extract_chart reads from disk) and run extraction."""
+    handle, temp_path = tempfile.mkstemp(suffix=suffix)
+    try:
+        with os.fdopen(handle, "wb") as temp_file:
+            temp_file.write(image_bytes)
+        try:
+            return extract_chart(temp_path, legend_area=legend_area)
+        except Exception as error:  # extraction fails on charts it cannot read
+            logger.exception("Extraction failed for %s", label)
+            raise HTTPException(
+                422,
+                "Could not digitalize this image: the axes, their labels or the "
+                "plotted line could not be recognised "
+                f"({type(error).__name__}: {error}).",
+            ) from error
+    finally:
+        os.unlink(temp_path)
+
+
 def _chart_payload(
     chart: StoredChart, grid_source: str, x_count: int, y_count: int
 ) -> dict:
@@ -135,6 +171,16 @@ def _chart_payload(
             "x2": extraction.chart_area[2],
             "y2": extraction.chart_area[3],
         },
+        "legend_area": (
+            {
+                "x1": extraction.legend_area[0],
+                "y1": extraction.legend_area[1],
+                "x2": extraction.legend_area[2],
+                "y2": extraction.legend_area[3],
+            }
+            if extraction.legend_area is not None
+            else None
+        ),
         "axes": {
             "x_is_datetime": extraction.x_is_datetime,
             "y_is_log": extraction.y_is_log,
@@ -142,6 +188,7 @@ def _chart_payload(
             "y_max": v_max,
         },
         "series": _series_payload(extraction),
+        "legend_matches": sum(1 for name in extraction.series_names if name),
         "ticks": build_axis_ticks(extraction, grid_source, x_count, y_count),
         "detected_grid": {
             "x": extraction.detected_grid_x,
@@ -173,23 +220,7 @@ async def create_chart(
             413, f"Image exceeds {MAX_UPLOAD_BYTES // (1024 * 1024)} MB"
         )
 
-    # extract_chart reads from disk, so the upload is staged in a temporary file
-    handle, temp_path = tempfile.mkstemp(suffix=suffix)
-    try:
-        with os.fdopen(handle, "wb") as temp_file:
-            temp_file.write(image_bytes)
-        try:
-            extraction = extract_chart(temp_path)
-        except Exception as error:  # extraction fails on charts it cannot read
-            logger.exception("Extraction failed for %s", file.filename)
-            raise HTTPException(
-                422,
-                "Could not digitalize this image: the axes, their labels or the "
-                "plotted line could not be recognised "
-                f"({type(error).__name__}: {error}).",
-            ) from error
-    finally:
-        os.unlink(temp_path)
+    extraction = _extract_from_bytes(image_bytes, suffix, label=file.filename)
 
     if not extraction.time_series:
         raise HTTPException(422, "No data points could be extracted from this image")
@@ -224,6 +255,38 @@ def get_ticks(
 ) -> dict:
     """Recompute the overlay grid without re-running extraction."""
     return build_axis_ticks(store.get(chart_id).extraction, source, x_count, y_count)
+
+
+@app.put(
+    "/api/charts/{chart_id}/legend-area",
+    summary="Search a specific area for the legend and re-run extraction",
+)
+def set_legend_area(
+    chart_id: str,
+    area: Optional[LegendAreaBody] = Body(
+        None,
+        description="Legend region in image pixels, or null to reset to the default",
+    ),
+    grid_source: str = Query("generated", pattern="^(generated|detected)$"),
+    x_ticks: int = Query(8, ge=2, le=40),
+    y_ticks: int = Query(6, ge=2, le=40),
+) -> dict:
+    """
+    Re-run extraction with legend detection restricted to `area` (the user-
+    highlighted region), or -- if `area` is omitted/null -- back to the default
+    top-left corner. Everything downstream of legend detection (series-to-name
+    matching, series color separation) is recomputed too.
+    """
+    chart = store.get(chart_id)
+    legend_area = (area.x1, area.y1, area.x2, area.y2) if area else None
+    suffix = os.path.splitext(chart.filename)[1].lower() or ".png"
+    extraction = _extract_from_bytes(
+        chart.image_bytes, suffix, legend_area=legend_area, label=chart.filename
+    )
+    if not extraction.time_series:
+        raise HTTPException(422, "No data points could be extracted from this image")
+    chart.extraction = extraction
+    return _chart_payload(chart, grid_source, x_ticks, y_ticks)
 
 
 @app.get("/api/charts/{chart_id}/image", summary="Original uploaded image")

@@ -3,7 +3,10 @@ from unittest import TestCase
 import numpy as np
 
 from src.multiline import (
+    LEGEND_LEFT_FRACTION,
+    LEGEND_TOP_FRACTION,
     cluster_ink_colors,
+    default_legend_search_area,
     find_legend_entries,
     match_series_to_legend,
 )
@@ -45,6 +48,21 @@ class TestClusterInkColors(TestCase):
         color_area = np.zeros((3, 3, 3), dtype=np.uint8)
         ink_mask = np.zeros((3, 3), dtype=bool)
         self.assertEqual(cluster_ink_colors(color_area, ink_mask), [])
+
+
+class TestDefaultLegendSearchArea(TestCase):
+    def test_top_left_corner_sized_by_fractions(self):
+        chart_area = (100, 50, 500, 350)  # width 400, height 300
+        search_area = default_legend_search_area(chart_area)
+        self.assertEqual(
+            search_area,
+            (
+                100,
+                50,
+                100 + LEGEND_LEFT_FRACTION * 400,
+                50 + LEGEND_TOP_FRACTION * 300,
+            ),
+        )
 
 
 class TestFindLegendEntries(TestCase):
@@ -121,6 +139,43 @@ class TestFindLegendEntries(TestCase):
 
         entries = find_legend_entries(texts, bboxes, (0, 0, width, height), color_img)
 
+        self.assertEqual(entries, [])
+
+    def test_explicit_search_area_finds_a_legend_outside_the_default_corner(self):
+        # A legend placed bottom-right sits entirely outside the default
+        # top-left search region, so it's invisible without a `search_area`
+        # override -- e.g. one the user highlighted in the UI.
+        width, height = 300, 200
+        color_img = np.full((height, width, 3), 255, dtype=np.uint8)
+        texts = ["Total", "Revenue"]
+        bboxes = [[210, 170, 240, 185], [245, 170, 285, 185]]
+        for box in bboxes:
+            _paint_box(color_img, box, (30, 30, 200))
+        chart_area = (0, 0, width, height)
+
+        self.assertEqual(find_legend_entries(texts, bboxes, chart_area, color_img), [])
+
+        entries = find_legend_entries(
+            texts, bboxes, chart_area, color_img, search_area=(200, 150, 300, 200)
+        )
+        self.assertEqual([e["name"] for e in entries], ["Total Revenue"])
+
+    def test_explicit_search_area_replaces_the_default_rather_than_widening_it(self):
+        # These tokens sit inside the default top-left region, so they'd be
+        # found with no override at all. Passing a `search_area` that no
+        # longer covers them must still exclude them -- an override replaces
+        # the default search region, it doesn't just add to it.
+        width, height = 300, 200
+        color_img = np.full((height, width, 3), 255, dtype=np.uint8)
+        texts = ["Total", "Revenue"]
+        bboxes = [[10, 10, 40, 22], [45, 10, 85, 22]]
+        for box in bboxes:
+            _paint_box(color_img, box, (30, 30, 200))
+        chart_area = (0, 0, width, height)
+
+        entries = find_legend_entries(
+            texts, bboxes, chart_area, color_img, search_area=(100, 100, 300, 200)
+        )
         self.assertEqual(entries, [])
 
 

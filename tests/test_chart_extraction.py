@@ -15,6 +15,7 @@ from src.chart_extraction import (
     select_series_clusters,
 )
 from src.function import Linear
+from src.multiline import default_legend_search_area
 from src.ocr_utils import texts_to_numbers
 from tests.test_data import adjust_knots_to_grid_data, extract_series_interference_data
 
@@ -654,6 +655,35 @@ class TestMultilineExtraction(TestCase):
                 "NOW: Price Target Low",
             },
         )
+
+    def test_legend_area_override_is_recorded_and_restricts_the_search(self):
+        """
+        Regression for extract_chart(..., legend_area=...): the override must
+        reach find_legend_entries (not be silently ignored, e.g. dropped
+        somewhere between the API and extract_chart), while the omitted case
+        keeps behaving exactly as before the search-area split.
+        """
+        image_path = os.path.join(REAL_MULTILINE_DIR, "img_3.png")
+        default = extract_chart(image_path)
+        expected_default_area = tuple(
+            int(round(v)) for v in default_legend_search_area(default.chart_area)
+        )
+        self.assertEqual(default.legend_area, expected_default_area)
+
+        # Passing that same region explicitly must reproduce identical results.
+        explicit_default = extract_chart(image_path, legend_area=expected_default_area)
+        self.assertEqual(explicit_default.legend_area, expected_default_area)
+        self.assertEqual(explicit_default.series_names, default.series_names)
+
+        # A small region deep in the plot's interior, away from the legend
+        # text, holds no legend rows -- the override must actually restrict
+        # the search rather than falling back to the default corner.
+        x1, y1, x2, y2 = default.chart_area
+        mid_x, mid_y = (x1 + x2) // 2, (y1 + y2) // 2
+        interior = (mid_x - 20, mid_y - 20, mid_x + 20, mid_y + 20)
+        restricted = extract_chart(image_path, legend_area=interior)
+        self.assertEqual(restricted.legend_area, interior)
+        self.assertEqual(restricted.series_names, [None] * len(restricted.series_names))
 
 
 class TestScrabStyleExtraction(TestCase):
