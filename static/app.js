@@ -666,7 +666,9 @@ function showTooltip(index, clientX) {
 
 function handlePointerMove(event) {
   if (!state.chart) return;
-  if (state.legendSelect.dragging) return updateLegendDrag(event);
+  if (state.legendSelect.active) {
+    return state.legendSelect.dragging ? updateLegendDrag(event) : handlePointerLeave();
+  }
   if (state.isPanning) return panTo(event);
   const index = pointIndexAt(event.clientX);
   if (index === null) return handlePointerLeave();
