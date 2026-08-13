@@ -63,15 +63,25 @@
               <input type="checkbox" id="opt-series" checked>
               <span>Extracted series</span>
             </label>
-            <label class="check">
-              <input type="checkbox" id="opt-area">
-              <span>Detected plot area</span>
-            </label>
             <label class="slider">
               <span>Dim original image <output id="opt-dim-value">0%</output></span>
               <input type="range" id="opt-dim" min="0" max="80" step="5" value="0">
             </label>
             <div class="swatches" id="swatches" role="radiogroup" aria-label="Series colour"></div>
+          </fieldset>
+
+          <fieldset class="control-group">
+            <legend>Plot area</legend>
+            <label class="check">
+              <input type="checkbox" id="opt-area" checked>
+              <span>Show plot area</span>
+            </label>
+            <div class="button-row">
+              <button type="button" class="button" id="chart-area-select"
+                aria-pressed="false">Select area&hellip;</button>
+              <button type="button" class="button" id="chart-area-reset">Reset to default</button>
+            </div>
+            <p class="hint" id="chart-area-hint"></p>
           </fieldset>
 
           <fieldset class="control-group">

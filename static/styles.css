@@ -146,7 +146,7 @@ main { max-width: 1180px; margin: 0 auto; display: grid; gap: 20px; }
 #overlay-canvas { display: block; width: 100%; height: auto; touch-action: none; }
 #overlay-canvas.is-zoomed { cursor: grab; }
 #overlay-canvas.is-panning { cursor: grabbing; }
-#overlay-canvas.is-selecting-legend { cursor: crosshair; }
+#overlay-canvas.is-selecting-area { cursor: crosshair; }
 
 .zoom-controls {
   position: absolute;
