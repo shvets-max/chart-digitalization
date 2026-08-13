@@ -25,7 +25,34 @@ const state = {
   lastView: { width: 0, height: 0 },
   isPanning: false,
   panPointerId: null,
-  areaSelect: { kind: null, active: false, dragging: false, pointerId: null, start: null, current: null },
+  areaSelect: {
+    kind: null,
+    active: false,
+    dragging: false,
+    pointerId: null,
+    // Set only while drawing a brand-new rectangle (handle === null).
+    start: null,
+    current: null,
+    // The rectangle once a first drag completes -- editable (via handle drag)
+    // until the user confirms or cancels it.
+    rect: null,
+    // Which handle is being dragged ('nw'/'n'/.../'move'), or null while
+    // drawing a brand-new rectangle.
+    handle: null,
+    dragAnchor: null,
+    rectAtDragStart: null,
+  },
+};
+
+// Distance (CSS px, independent of zoom) within which a pointer counts as
+// "on" a pending rectangle's edge/corner rather than its interior.
+const HANDLE_TOLERANCE = 8;
+const HANDLE_CURSORS = {
+  nw: "nwse-resize", se: "nwse-resize",
+  ne: "nesw-resize", sw: "nesw-resize",
+  n: "ns-resize", s: "ns-resize",
+  e: "ew-resize", w: "ew-resize",
+  move: "move",
 };
 
 // Drag-to-select is shared by the legend area and the plot area: only the
@@ -33,6 +60,7 @@ const state = {
 const AREA_KINDS = {
   legend: {
     endpoint: "legend-area",
+    payloadKey: "legend_area",
     selectButtonId: "legend-area-select",
     resetButtonId: "legend-area-reset",
     applyMessage: "Searching the highlighted area for a legend…",
@@ -40,6 +68,7 @@ const AREA_KINDS = {
   },
   chart: {
     endpoint: "chart-area",
+    payloadKey: "chart_area",
     selectButtonId: "chart-area-select",
     resetButtonId: "chart-area-reset",
     applyMessage: "Re-extracting with the highlighted plot area…",
@@ -286,6 +315,8 @@ function render() {
   drawAreaDragPreview(view);
   if (el("opt-scale").checked) drawNumericScale(view);
   if (el("opt-series").checked) drawSeries(view);
+
+  updateConfirmPopup();
 }
 
 function drawPlotArea(view) {
@@ -326,22 +357,68 @@ function drawLegendArea(view) {
   }
 }
 
-/* Live preview of the rectangle being dragged, for whichever area (legend or
-   plot) is currently being selected. */
+/* The rectangle currently being selected for the legend or plot area: either
+   a brand-new one still being dragged out, or a settled "pending" one (drawn
+   with resize handles) awaiting Confirm/Cancel. */
 function drawAreaDragPreview(view) {
-  const drag = state.areaSelect;
-  if (!drag.dragging || !drag.start || !drag.current) return;
-  const area = normalizedDragArea(drag.start, drag.current);
-  strokeRectArea(view, area, cssVar("--series-1"), [4, 3], 0.12);
+  const select = state.areaSelect;
+  if (!select.active) return;
+  if (select.rect) {
+    strokeRectArea(view, select.rect, cssVar("--series-1"), [4, 3], 0.12);
+    drawAreaHandles(view, select.rect);
+  } else if (select.dragging && select.start && select.current) {
+    const area = normalizeRect({
+      x1: select.start.x, y1: select.start.y,
+      x2: select.current.x, y2: select.current.y,
+    });
+    strokeRectArea(view, area, cssVar("--series-1"), [4, 3], 0.12);
+  }
 }
 
-function normalizedDragArea(start, current) {
+/* Small squares at the 4 corners + 4 edge midpoints of a pending rectangle,
+   marking where a drag resizes rather than moves it (see hitTestHandle). */
+function drawAreaHandles(view, rect) {
+  const midX = (rect.x1 + rect.x2) / 2;
+  const midY = (rect.y1 + rect.y2) / 2;
+  const points = [
+    [rect.x1, rect.y1], [rect.x2, rect.y1], [rect.x1, rect.y2], [rect.x2, rect.y2],
+    [midX, rect.y1], [midX, rect.y2], [rect.x1, midY], [rect.x2, midY],
+  ];
+  ctx.save();
+  ctx.fillStyle = cssVar("--series-1");
+  ctx.strokeStyle = cssVar("--surface-1");
+  ctx.lineWidth = 1;
+  for (const [x, y] of points) {
+    const cx = view.x(x), cy = view.y(y);
+    ctx.beginPath();
+    ctx.rect(cx - 4, cy - 4, 8, 8);
+    ctx.fill();
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function normalizeRect(rect) {
   return {
-    x1: Math.min(start.x, current.x),
-    y1: Math.min(start.y, current.y),
-    x2: Math.max(start.x, current.x),
-    y2: Math.max(start.y, current.y),
+    x1: Math.min(rect.x1, rect.x2),
+    y1: Math.min(rect.y1, rect.y2),
+    x2: Math.max(rect.x1, rect.x2),
+    y2: Math.max(rect.y1, rect.y2),
   };
+}
+
+function resizeRect(rect, handle, dx, dy) {
+  const r = { ...rect };
+  if (handle === "move") {
+    r.x1 += dx; r.x2 += dx;
+    r.y1 += dy; r.y2 += dy;
+    return r;
+  }
+  if (handle.includes("n")) r.y1 += dy;
+  if (handle.includes("s")) r.y2 += dy;
+  if (handle.includes("w")) r.x1 += dx;
+  if (handle.includes("e")) r.x2 += dx;
+  return r;
 }
 
 function drawGrid(view) {
@@ -539,7 +616,7 @@ function handleWheelZoom(event) {
 }
 
 function startPan(event) {
-  if (state.areaSelect.active) return startAreaDrag(event);
+  if (state.areaSelect.active) return startAreaInteraction(event);
   if (state.zoom.scale <= 1) return;
   state.isPanning = true;
   state.panPointerId = event.pointerId;
@@ -558,7 +635,7 @@ function panTo(event) {
 }
 
 function endPan(event) {
-  if (state.areaSelect.dragging) return finishAreaDrag(event);
+  if (state.areaSelect.dragging) return finishAreaInteraction(event);
   if (!state.isPanning) return;
   state.isPanning = false;
   canvas.classList.remove("is-panning");
@@ -589,24 +666,87 @@ function imagePointAt(clientX, clientY) {
   return { x: userX / state.viewScale, y: userY / state.viewScale };
 }
 
+/* Inverse of imagePointAt: an image-pixel coordinate -> client (viewport)
+   coordinates, for hit-testing a pending rectangle's handles against a raw
+   pointer event and for positioning the confirm popup. */
+function clientPointFor(imageX, imageY) {
+  const rect = canvas.getBoundingClientRect();
+  const zoom = state.zoom;
+  return {
+    x: rect.left + zoom.tx + imageX * state.viewScale * zoom.scale,
+    y: rect.top + zoom.ty + imageY * state.viewScale * zoom.scale,
+  };
+}
+
+/* Which handle of `rect` (image coords) client point (clientX, clientY) is
+   on, if any: a corner ('nw'/'ne'/'sw'/'se'), an edge ('n'/'s'/'e'/'w'), the
+   interior ('move'), or null if outside the rectangle entirely. Tolerance is
+   in CSS px so handles stay a constant visual size regardless of zoom. */
+function hitTestHandle(clientX, clientY, rect) {
+  const topLeft = clientPointFor(rect.x1, rect.y1);
+  const bottomRight = clientPointFor(rect.x2, rect.y2);
+  const t = HANDLE_TOLERANCE;
+  if (
+    clientX < topLeft.x - t || clientX > bottomRight.x + t ||
+    clientY < topLeft.y - t || clientY > bottomRight.y + t
+  ) {
+    return null;
+  }
+
+  const near = (a, b) => Math.abs(a - b) <= t;
+  const onLeft = near(clientX, topLeft.x);
+  const onRight = near(clientX, bottomRight.x);
+  const onTop = near(clientY, topLeft.y);
+  const onBottom = near(clientY, bottomRight.y);
+
+  if (onTop && onLeft) return "nw";
+  if (onTop && onRight) return "ne";
+  if (onBottom && onLeft) return "sw";
+  if (onBottom && onRight) return "se";
+  if (onTop) return "n";
+  if (onBottom) return "s";
+  if (onLeft) return "w";
+  if (onRight) return "e";
+  return "move";
+}
+
 /* ------------------------------------------------------------------- areas */
 /* Drag-to-select for the legend area and the plot area: only one can be
    active at a time, since both are drawn with the same pointer gesture on
-   the same canvas. */
+   the same canvas. A drag first draws out a rectangle; releasing settles it
+   into a "pending" state where its edges/corners can be dragged to resize,
+   or its interior dragged to move it, until the user confirms or cancels. */
+
+// The area currently in effect for `kind`, as a draggable rect -- so turning
+// on select mode starts from something already there instead of a blank
+// canvas the user has to draw from scratch.
+function currentAreaRect(kind) {
+  const area = state.chart && state.chart[AREA_KINDS[kind].payloadKey];
+  return area ? { x1: area.x1, y1: area.y1, x2: area.x2, y2: area.y2 } : null;
+}
 
 function setAreaSelectMode(kind, active) {
   const previousKind = state.areaSelect.kind;
   if (previousKind && previousKind !== kind) resetSelectButton(previousKind);
 
-  state.areaSelect.kind = active ? kind : null;
-  state.areaSelect.active = active;
-  state.areaSelect.dragging = false;
-  state.areaSelect.start = state.areaSelect.current = null;
+  Object.assign(state.areaSelect, {
+    kind: active ? kind : null,
+    active,
+    dragging: false,
+    start: null,
+    current: null,
+    rect: active ? currentAreaRect(kind) : null,
+    handle: null,
+    dragAnchor: null,
+    rectAtDragStart: null,
+  });
   canvas.classList.toggle("is-selecting-area", active);
+  canvas.style.cursor = "";
 
   const button = el(AREA_KINDS[kind].selectButtonId);
   button.setAttribute("aria-pressed", String(active));
   button.textContent = active ? "Drag to select…" : "Select area…";
+  render();
 }
 
 function resetSelectButton(kind) {
@@ -615,35 +755,120 @@ function resetSelectButton(kind) {
   button.textContent = "Select area…";
 }
 
-function startAreaDrag(event) {
+function startAreaInteraction(event) {
   const select = state.areaSelect;
+
+  if (select.rect) {
+    const handle = hitTestHandle(event.clientX, event.clientY, select.rect);
+    if (handle) {
+      select.dragging = true;
+      select.handle = handle;
+      select.pointerId = event.pointerId;
+      select.dragAnchor = imagePointAt(event.clientX, event.clientY);
+      select.rectAtDragStart = { ...select.rect };
+      canvas.setPointerCapture(event.pointerId);
+      return;
+    }
+    // Clicked outside the pending rectangle: abandon it and draw a new one.
+    select.rect = null;
+  }
+
   select.dragging = true;
+  select.handle = null;
   select.pointerId = event.pointerId;
   select.start = imagePointAt(event.clientX, event.clientY);
   select.current = select.start;
   canvas.setPointerCapture(event.pointerId);
-}
-
-function updateAreaDrag(event) {
-  state.areaSelect.current = imagePointAt(event.clientX, event.clientY);
   render();
 }
 
-async function finishAreaDrag(event) {
+function updateAreaInteraction(event) {
   const select = state.areaSelect;
-  const { kind, start, current, pointerId } = select;
-  select.dragging = false;
-  select.start = select.current = null;
-  if (pointerId !== null) canvas.releasePointerCapture(pointerId);
-  setAreaSelectMode(kind, false);
+  if (select.handle) {
+    const point = imagePointAt(event.clientX, event.clientY);
+    const dx = point.x - select.dragAnchor.x;
+    const dy = point.y - select.dragAnchor.y;
+    select.rect = normalizeRect(resizeRect(select.rectAtDragStart, select.handle, dx, dy));
+  } else {
+    select.current = imagePointAt(event.clientX, event.clientY);
+  }
+  render();
+}
 
-  // Too small to be a deliberate selection (e.g. a stray click): leave the
-  // current area untouched instead of applying a sliver.
+// Hover feedback (resize/move cursor) while a pending rectangle exists but
+// nothing is currently being dragged.
+function updateAreaHover(event) {
+  const select = state.areaSelect;
+  if (!select.rect) {
+    canvas.style.cursor = "";
+    return;
+  }
+  const handle = hitTestHandle(event.clientX, event.clientY, select.rect);
+  canvas.style.cursor = handle ? HANDLE_CURSORS[handle] || "crosshair" : "crosshair";
+}
+
+function finishAreaInteraction(event) {
+  const select = state.areaSelect;
+  const { pointerId, handle } = select;
+  select.dragging = false;
+  if (pointerId !== null) canvas.releasePointerCapture(pointerId);
+  select.pointerId = null;
+
+  if (handle) {
+    // Finished resizing/moving an already-pending rectangle: stays pending.
+    select.handle = null;
+    select.dragAnchor = select.rectAtDragStart = null;
+    render();
+    return;
+  }
+
+  const { start, current } = select;
+  select.start = select.current = null;
+  // Too small to be a deliberate selection (e.g. a stray click): stay in
+  // select mode with no pending rectangle, ready to try again.
   if (!start || !current || Math.abs(current.x - start.x) < 6 || Math.abs(current.y - start.y) < 6) {
     render();
     return;
   }
-  await applyArea(kind, normalizedDragArea(start, current));
+  select.rect = normalizeRect({ x1: start.x, y1: start.y, x2: current.x, y2: current.y });
+  render();
+}
+
+async function confirmAreaSelection() {
+  const select = state.areaSelect;
+  if (!select.rect || !select.kind) return;
+  const { kind, rect } = select;
+  setAreaSelectMode(kind, false);
+  await applyArea(kind, rect);
+}
+
+function cancelAreaSelection() {
+  const select = state.areaSelect;
+  select.rect = null;
+  select.handle = null;
+  select.dragAnchor = select.rectAtDragStart = null;
+  render();
+}
+
+/* Shows/hides and positions the Confirm/Cancel popup under the pending
+   rectangle. Hidden while a handle drag is in progress so it doesn't jump
+   around under the pointer; it reappears once the drag settles. */
+function updateConfirmPopup() {
+  const popup = el("area-confirm");
+  const select = state.areaSelect;
+  if (!select.active || !select.rect || select.handle) {
+    popup.hidden = true;
+    return;
+  }
+  popup.hidden = false;
+
+  const wrap = el("canvas-wrap");
+  const wrapRect = wrap.getBoundingClientRect();
+  const anchor = clientPointFor((select.rect.x1 + select.rect.x2) / 2, select.rect.y2);
+  const left = anchor.x - wrapRect.left - popup.offsetWidth / 2;
+  const top = anchor.y - wrapRect.top + 10;
+  popup.style.left = `${Math.max(8, Math.min(left, wrapRect.width - popup.offsetWidth - 8))}px`;
+  popup.style.top = `${Math.max(8, Math.min(top, wrapRect.height - popup.offsetHeight - 8))}px`;
 }
 
 async function applyArea(kind, area) {
@@ -713,7 +938,9 @@ function showTooltip(index, clientX) {
 function handlePointerMove(event) {
   if (!state.chart) return;
   if (state.areaSelect.active) {
-    return state.areaSelect.dragging ? updateAreaDrag(event) : handlePointerLeave();
+    if (state.areaSelect.dragging) return updateAreaInteraction(event);
+    updateAreaHover(event);
+    return handlePointerLeave();
   }
   if (state.isPanning) return panTo(event);
   const index = pointIndexAt(event.clientX);
@@ -838,6 +1065,8 @@ function bindControls() {
     });
     el(config.resetButtonId).addEventListener("click", () => resetArea(kind));
   }
+  el("area-confirm-accept").addEventListener("click", confirmAreaSelection);
+  el("area-confirm-cancel").addEventListener("click", cancelAreaSelection);
 
   canvas.addEventListener("pointermove", handlePointerMove);
   canvas.addEventListener("pointerleave", handlePointerLeave);
