@@ -33,8 +33,8 @@ app = FastAPI(
 )
 
 
-class LegendAreaBody(BaseModel):
-    """User-highlighted legend region, in original-image pixel coordinates."""
+class AreaBody(BaseModel):
+    """A user-highlighted rectangle, in original-image pixel coordinates."""
 
     x1: float
     y1: float
@@ -51,6 +51,8 @@ class StoredChart:
     media_type: str
     image_bytes: bytes
     extraction: ChartExtraction
+    chart_area_override: Optional[tuple[float, float, float, float]] = None
+    legend_area_override: Optional[tuple[float, float, float, float]] = None
 
 
 class ChartStore:
@@ -129,6 +131,7 @@ def _series_payload(extraction: ChartExtraction) -> list[dict]:
 def _extract_from_bytes(
     image_bytes: bytes,
     suffix: str,
+    chart_area: Optional[tuple[float, float, float, float]] = None,
     legend_area: Optional[tuple[float, float, float, float]] = None,
     label: str = "upload",
 ) -> ChartExtraction:
@@ -138,7 +141,9 @@ def _extract_from_bytes(
         with os.fdopen(handle, "wb") as temp_file:
             temp_file.write(image_bytes)
         try:
-            return extract_chart(temp_path, legend_area=legend_area)
+            return extract_chart(
+                temp_path, chart_area=chart_area, legend_area=legend_area
+            )
         except Exception as error:  # extraction fails on charts it cannot read
             logger.exception("Extraction failed for %s", label)
             raise HTTPException(
@@ -263,7 +268,7 @@ def get_ticks(
 )
 def set_legend_area(
     chart_id: str,
-    area: Optional[LegendAreaBody] = Body(
+    area: Optional[AreaBody] = Body(
         None,
         description="Legend region in image pixels, or null to reset to the default",
     ),
@@ -275,17 +280,61 @@ def set_legend_area(
     Re-run extraction with legend detection restricted to `area` (the user-
     highlighted region), or -- if `area` is omitted/null -- back to the default
     top-left corner. Everything downstream of legend detection (series-to-name
-    matching, series color separation) is recomputed too.
+    matching, series color separation) is recomputed too. Any chart-area
+    override set via PUT .../chart-area is preserved.
     """
     chart = store.get(chart_id)
     legend_area = (area.x1, area.y1, area.x2, area.y2) if area else None
     suffix = os.path.splitext(chart.filename)[1].lower() or ".png"
     extraction = _extract_from_bytes(
-        chart.image_bytes, suffix, legend_area=legend_area, label=chart.filename
+        chart.image_bytes,
+        suffix,
+        chart_area=chart.chart_area_override,
+        legend_area=legend_area,
+        label=chart.filename,
     )
     if not extraction.time_series:
         raise HTTPException(422, "No data points could be extracted from this image")
     chart.extraction = extraction
+    chart.legend_area_override = legend_area
+    return _chart_payload(chart, grid_source, x_ticks, y_ticks)
+
+
+@app.put(
+    "/api/charts/{chart_id}/chart-area",
+    summary="Set the plot area to a specific region and re-run extraction",
+)
+def set_chart_area(
+    chart_id: str,
+    area: Optional[AreaBody] = Body(
+        None,
+        description="Plot-area region in image pixels, or null to reset to auto-detection",
+    ),
+    grid_source: str = Query("generated", pattern="^(generated|detected)$"),
+    x_ticks: int = Query(8, ge=2, le=40),
+    y_ticks: int = Query(6, ge=2, le=40),
+) -> dict:
+    """
+    Re-run extraction with the plot area fixed to `area` (the user-highlighted
+    region), or -- if `area` is omitted/null -- back to auto-detection. Series
+    extraction, grid detection and the legend's default search region (which is
+    itself derived from the plot area) are all recomputed too. Any legend-area
+    override set via PUT .../legend-area is preserved.
+    """
+    chart = store.get(chart_id)
+    chart_area = (area.x1, area.y1, area.x2, area.y2) if area else None
+    suffix = os.path.splitext(chart.filename)[1].lower() or ".png"
+    extraction = _extract_from_bytes(
+        chart.image_bytes,
+        suffix,
+        chart_area=chart_area,
+        legend_area=chart.legend_area_override,
+        label=chart.filename,
+    )
+    if not extraction.time_series:
+        raise HTTPException(422, "No data points could be extracted from this image")
+    chart.extraction = extraction
+    chart.chart_area_override = chart_area
     return _chart_payload(chart, grid_source, x_ticks, y_ticks)
 
 

@@ -248,14 +248,19 @@ def build_axis_ticks(
 
 
 def extract_chart(
-    image_path: str, legend_area: Optional[tuple[int, int, int, int]] = None
+    image_path: str,
+    chart_area: Optional[tuple[int, int, int, int]] = None,
+    legend_area: Optional[tuple[int, int, int, int]] = None,
 ) -> ChartExtraction:
     """
     Digitalize a chart image: the series plus the pixel geometry to draw it.
 
+    `chart_area` (left, top, right, bottom) overrides plot-area detection with a
+    user-highlighted region, e.g. when auto-detection got the boundary wrong.
     `legend_area` (left, top, right, bottom) restricts legend detection to a
     user-highlighted region, e.g. when the legend sits somewhere other than the
-    default top-left corner. Omit it to search the default corner.
+    default top-left corner. Omit either to auto-detect / search the default
+    corner.
     """
     # Load image
     if not os.path.exists(image_path):
@@ -292,12 +297,17 @@ def extract_chart(
     rows_bboxes = [box for box, ok in zip(rows_bboxes, valid) if ok]
     row_index = [dt for dt, ok in zip(row_index, valid) if ok]
 
-    cut_area, location = cut_chart_area(thresh, rows_bboxes, columns_bboxes)
+    if chart_area is not None:
+        # User-highlighted plot area: skip auto-detection and use it as-is.
+        location = tuple(int(round(v)) for v in chart_area)
+    else:
+        _, location = cut_chart_area(thresh, rows_bboxes, columns_bboxes)
     x_offset, y_offset, x2, y2 = location
+    chart_pixels = thresh[y_offset:y2, x_offset:x2]
 
     # reconstruct grid components
-    grid_y_component_map = cut_area.mean(axis=1) > 0.5
-    grid_x_component_map = cut_area.mean(axis=0) > 0.5
+    grid_y_component_map = chart_pixels.mean(axis=1) > 0.5
+    grid_x_component_map = chart_pixels.mean(axis=0) > 0.5
 
     grid_x_component = np.nonzero(grid_x_component_map)[0]
     grid_y_component = np.nonzero(grid_y_component_map)[0]
@@ -327,9 +337,8 @@ def extract_chart(
     x_scale = create_x_scale(row_index, x_knots)
 
     # Remove grid lines from chart area
-    chart_area = thresh[y_offset:y2, x_offset:x2]
-    chart_area[grid_y_component, :] = 0
-    chart_area[:, grid_x_component] = 0
+    chart_pixels[grid_y_component, :] = 0
+    chart_pixels[:, grid_x_component] = 0
 
     # A legend (if any) must be detected before color separation, not after: small
     # text is mostly anti-aliased blur, and its scattered pale pixels can otherwise
@@ -345,7 +354,7 @@ def extract_chart(
     legend_entries = find_legend_entries(
         texts, bboxes, chart_bounds, img, search_area=legend_search_area
     )
-    ink_mask = chart_area.astype(bool)
+    ink_mask = chart_pixels.astype(bool)
     for entry in legend_entries:
         left, top, right, bottom = entry["bbox"]
         ink_mask[
@@ -368,7 +377,7 @@ def extract_chart(
     )
 
     if series_clusters:
-        width = chart_area.shape[1]
+        width = chart_pixels.shape[1]
         time_series = [
             (
                 x_scale(x + x_offset),

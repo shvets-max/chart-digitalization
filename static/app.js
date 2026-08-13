@@ -25,7 +25,26 @@ const state = {
   lastView: { width: 0, height: 0 },
   isPanning: false,
   panPointerId: null,
-  legendSelect: { active: false, dragging: false, pointerId: null, start: null, current: null },
+  areaSelect: { kind: null, active: false, dragging: false, pointerId: null, start: null, current: null },
+};
+
+// Drag-to-select is shared by the legend area and the plot area: only the
+// endpoint and the status messages differ between the two.
+const AREA_KINDS = {
+  legend: {
+    endpoint: "legend-area",
+    selectButtonId: "legend-area-select",
+    resetButtonId: "legend-area-reset",
+    applyMessage: "Searching the highlighted area for a legend…",
+    resetMessage: "Resetting to the default legend area…",
+  },
+  chart: {
+    endpoint: "chart-area",
+    selectButtonId: "chart-area-select",
+    resetButtonId: "chart-area-reset",
+    applyMessage: "Re-extracting with the highlighted plot area…",
+    resetMessage: "Resetting the plot area to auto-detection…",
+  },
 };
 
 const el = (id) => document.getElementById(id);
@@ -95,7 +114,7 @@ async function showChart(chart) {
   renderBadges(chart);
   renderSeriesToggles(chart);
   renderTable(chart);
-  updateLegendHint(chart);
+  updateAreaHints(chart);
   el("scale-hint").textContent = chart.axes.y_is_log
     ? "Values read off a logarithmic y-axis."
     : "Values read off a linear y-axis.";
@@ -104,14 +123,14 @@ async function showChart(chart) {
   render();
 }
 
-/* Refresh from a re-extraction (e.g. after picking a new legend area) without
-   reloading the image or resetting zoom/pan -- only the chart data changed. */
+/* Refresh from a re-extraction (e.g. after picking a new legend or plot area)
+   without reloading the image or resetting zoom/pan -- only the chart data changed. */
 async function updateChart(chart) {
   state.chart = chart;
   renderBadges(chart);
   renderSeriesToggles(chart);
   renderTable(chart);
-  updateLegendHint(chart);
+  updateAreaHints(chart);
   el("scale-hint").textContent = chart.axes.y_is_log
     ? "Values read off a logarithmic y-axis."
     : "Values read off a linear y-axis.";
@@ -120,13 +139,18 @@ async function updateChart(chart) {
   render();
 }
 
-function updateLegendHint(chart) {
-  const hint = el("legend-area-hint");
+function updateAreaHints(chart) {
+  const legendHint = el("legend-area-hint");
   if (!chart.legend_matches) {
-    hint.textContent = "No legend matched in this area. Drag a rectangle over the legend to search there.";
+    legendHint.textContent = "No legend matched in this area. Drag a rectangle over the legend to search there.";
   } else {
-    hint.textContent = `${chart.legend_matches} series name${chart.legend_matches === 1 ? "" : "s"} matched from the legend.`;
+    legendHint.textContent = `${chart.legend_matches} series name${chart.legend_matches === 1 ? "" : "s"} matched from the legend.`;
   }
+
+  const a = chart.chart_area;
+  el("chart-area-hint").textContent =
+    `Plot area: ${Math.round(a.x2 - a.x1)}×${Math.round(a.y2 - a.y1)} px. ` +
+    `Drag "Select area…" if detection got the boundary wrong.`;
 }
 
 function renderBadges(chart) {
@@ -259,6 +283,7 @@ function render() {
   if (el("opt-grid").value !== "off") drawGrid(view);
   if (el("opt-area").checked) drawPlotArea(view);
   if (el("opt-legend-area").checked) drawLegendArea(view);
+  drawAreaDragPreview(view);
   if (el("opt-scale").checked) drawNumericScale(view);
   if (el("opt-series").checked) drawSeries(view);
 }
@@ -294,16 +319,20 @@ function strokeRectArea(view, area, color, dash, fillAlpha = 0) {
 }
 
 /* The area currently searched for a legend (default top-left corner unless the
-   user highlighted one), plus a live preview of the rectangle being dragged. */
+   user highlighted one). */
 function drawLegendArea(view) {
   if (state.chart.legend_area) {
     strokeRectArea(view, state.chart.legend_area, cssVar("--series-2"), [6, 3]);
   }
-  const drag = state.legendSelect;
-  if (drag.dragging && drag.start && drag.current) {
-    const area = normalizedDragArea(drag.start, drag.current);
-    strokeRectArea(view, area, cssVar("--series-1"), [4, 3], 0.12);
-  }
+}
+
+/* Live preview of the rectangle being dragged, for whichever area (legend or
+   plot) is currently being selected. */
+function drawAreaDragPreview(view) {
+  const drag = state.areaSelect;
+  if (!drag.dragging || !drag.start || !drag.current) return;
+  const area = normalizedDragArea(drag.start, drag.current);
+  strokeRectArea(view, area, cssVar("--series-1"), [4, 3], 0.12);
 }
 
 function normalizedDragArea(start, current) {
@@ -510,7 +539,7 @@ function handleWheelZoom(event) {
 }
 
 function startPan(event) {
-  if (state.legendSelect.active) return startLegendDrag(event);
+  if (state.areaSelect.active) return startAreaDrag(event);
   if (state.zoom.scale <= 1) return;
   state.isPanning = true;
   state.panPointerId = event.pointerId;
@@ -529,7 +558,7 @@ function panTo(event) {
 }
 
 function endPan(event) {
-  if (state.legendSelect.dragging) return finishLegendDrag(event);
+  if (state.areaSelect.dragging) return finishAreaDrag(event);
   if (!state.isPanning) return;
   state.isPanning = false;
   canvas.classList.remove("is-panning");
@@ -551,7 +580,7 @@ function toggleFullscreen() {
 
 /* Client (viewport) coordinates -> original-image pixel coordinates, undoing
    both the zoom/pan transform and the CSS-to-natural-size scale. Used to turn
-   a legend-area drag into the same pixel space as chart_area/legend_area. */
+   an area drag into the same pixel space as chart_area/legend_area. */
 function imagePointAt(clientX, clientY) {
   const rect = canvas.getBoundingClientRect();
   const zoom = state.zoom;
@@ -560,17 +589,34 @@ function imagePointAt(clientX, clientY) {
   return { x: userX / state.viewScale, y: userY / state.viewScale };
 }
 
-/* ------------------------------------------------------------- legend area */
+/* ------------------------------------------------------------------- areas */
+/* Drag-to-select for the legend area and the plot area: only one can be
+   active at a time, since both are drawn with the same pointer gesture on
+   the same canvas. */
 
-function setLegendSelectMode(active) {
-  state.legendSelect.active = active;
-  canvas.classList.toggle("is-selecting-legend", active);
-  el("legend-area-select").setAttribute("aria-pressed", String(active));
-  el("legend-area-select").textContent = active ? "Drag over the legend…" : "Select area…";
+function setAreaSelectMode(kind, active) {
+  const previousKind = state.areaSelect.kind;
+  if (previousKind && previousKind !== kind) resetSelectButton(previousKind);
+
+  state.areaSelect.kind = active ? kind : null;
+  state.areaSelect.active = active;
+  state.areaSelect.dragging = false;
+  state.areaSelect.start = state.areaSelect.current = null;
+  canvas.classList.toggle("is-selecting-area", active);
+
+  const button = el(AREA_KINDS[kind].selectButtonId);
+  button.setAttribute("aria-pressed", String(active));
+  button.textContent = active ? "Drag to select…" : "Select area…";
 }
 
-function startLegendDrag(event) {
-  const select = state.legendSelect;
+function resetSelectButton(kind) {
+  const button = el(AREA_KINDS[kind].selectButtonId);
+  button.setAttribute("aria-pressed", "false");
+  button.textContent = "Select area…";
+}
+
+function startAreaDrag(event) {
+  const select = state.areaSelect;
   select.dragging = true;
   select.pointerId = event.pointerId;
   select.start = imagePointAt(event.clientX, event.clientY);
@@ -578,41 +624,41 @@ function startLegendDrag(event) {
   canvas.setPointerCapture(event.pointerId);
 }
 
-function updateLegendDrag(event) {
-  state.legendSelect.current = imagePointAt(event.clientX, event.clientY);
+function updateAreaDrag(event) {
+  state.areaSelect.current = imagePointAt(event.clientX, event.clientY);
   render();
 }
 
-async function finishLegendDrag(event) {
-  const select = state.legendSelect;
-  const { start, current, pointerId } = select;
+async function finishAreaDrag(event) {
+  const select = state.areaSelect;
+  const { kind, start, current, pointerId } = select;
   select.dragging = false;
   select.start = select.current = null;
   if (pointerId !== null) canvas.releasePointerCapture(pointerId);
-  setLegendSelectMode(false);
+  setAreaSelectMode(kind, false);
 
   // Too small to be a deliberate selection (e.g. a stray click): leave the
-  // current legend area untouched instead of searching a sliver.
+  // current area untouched instead of applying a sliver.
   if (!start || !current || Math.abs(current.x - start.x) < 6 || Math.abs(current.y - start.y) < 6) {
     render();
     return;
   }
-  await applyLegendArea(normalizedDragArea(start, current));
+  await applyArea(kind, normalizedDragArea(start, current));
 }
 
-async function applyLegendArea(area) {
-  await sendLegendArea(area, "Searching the highlighted area for a legend…");
+async function applyArea(kind, area) {
+  await sendArea(kind, area, AREA_KINDS[kind].applyMessage);
 }
 
-async function resetLegendArea() {
-  await sendLegendArea(null, "Resetting to the default legend area…");
+async function resetArea(kind) {
+  await sendArea(kind, null, AREA_KINDS[kind].resetMessage);
 }
 
-async function sendLegendArea(area, busyMessage) {
+async function sendArea(kind, area, busyMessage) {
   if (!state.chart) return;
   setStatus(busyMessage, "busy");
   try {
-    const response = await fetch(`/api/charts/${state.chart.id}/legend-area`, {
+    const response = await fetch(`/api/charts/${state.chart.id}/${AREA_KINDS[kind].endpoint}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(area),
@@ -622,7 +668,7 @@ async function sendLegendArea(area, busyMessage) {
     await updateChart(payload);
     setStatus(`Extracted ${countValues(payload)} points from ${payload.filename}.`);
   } catch (error) {
-    setStatus(error.message || "Legend search failed.", "error");
+    setStatus(error.message || "Area update failed.", "error");
   }
 }
 
@@ -666,8 +712,8 @@ function showTooltip(index, clientX) {
 
 function handlePointerMove(event) {
   if (!state.chart) return;
-  if (state.legendSelect.active) {
-    return state.legendSelect.dragging ? updateLegendDrag(event) : handlePointerLeave();
+  if (state.areaSelect.active) {
+    return state.areaSelect.dragging ? updateAreaDrag(event) : handlePointerLeave();
   }
   if (state.isPanning) return panTo(event);
   const index = pointIndexAt(event.clientX);
@@ -784,10 +830,14 @@ function bindControls() {
 
   el("series-toggles").addEventListener("click", handleSeriesToggleClick);
 
-  el("legend-area-select").addEventListener("click", () => {
-    setLegendSelectMode(!state.legendSelect.active);
-  });
-  el("legend-area-reset").addEventListener("click", resetLegendArea);
+  for (const kind of Object.keys(AREA_KINDS)) {
+    const config = AREA_KINDS[kind];
+    el(config.selectButtonId).addEventListener("click", () => {
+      const isActive = state.areaSelect.active && state.areaSelect.kind === kind;
+      setAreaSelectMode(kind, !isActive);
+    });
+    el(config.resetButtonId).addEventListener("click", () => resetArea(kind));
+  }
 
   canvas.addEventListener("pointermove", handlePointerMove);
   canvas.addEventListener("pointerleave", handlePointerLeave);

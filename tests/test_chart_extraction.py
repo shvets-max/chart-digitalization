@@ -685,6 +685,32 @@ class TestMultilineExtraction(TestCase):
         self.assertEqual(restricted.legend_area, interior)
         self.assertEqual(restricted.series_names, [None] * len(restricted.series_names))
 
+    def test_chart_area_override_is_recorded_and_used(self):
+        """
+        Regression for extract_chart(..., chart_area=...): the override must
+        replace auto-detection (cut_chart_area) rather than being ignored, while
+        the omitted case keeps auto-detecting exactly as before.
+        """
+        image_path = os.path.join(REAL_MULTILINE_DIR, "img_3.png")
+        default = extract_chart(image_path)
+
+        # Passing the auto-detected box back explicitly must reproduce
+        # identical results -- the override path is behaviorally equivalent
+        # to auto-detection when given the same box.
+        explicit_default = extract_chart(image_path, chart_area=default.chart_area)
+        self.assertEqual(explicit_default.chart_area, default.chart_area)
+        self.assertEqual(explicit_default.time_series, default.time_series)
+        self.assertEqual(explicit_default.series_names, default.series_names)
+
+        # A slightly shrunk box must be honored exactly (not silently widened
+        # back to the auto-detected one), and the legend's own default search
+        # area -- derived from chart_area -- must shift with it.
+        x1, y1, x2, y2 = default.chart_area
+        shrunk = (x1 + 5, y1 + 5, x2 - 5, y2 - 5)
+        custom = extract_chart(image_path, chart_area=shrunk)
+        self.assertEqual(custom.chart_area, shrunk)
+        self.assertNotEqual(custom.legend_area, default.legend_area)
+
 
 class TestScrabStyleExtraction(TestCase):
     """
