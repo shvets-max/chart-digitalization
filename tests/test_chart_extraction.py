@@ -3,12 +3,16 @@ import os
 from datetime import date, datetime
 from typing import Optional
 from unittest import TestCase
+from unittest.mock import patch
 
 import numpy as np
 
 from src.chart_extraction import (
+    ChartGridData,
+    ChartImageData,
     adjust_knots_to_grid,
     extract_chart,
+    extract_chart_series,
     extract_time_series,
     extract_time_series_from_chart_area,
     select_axis_tick_group,
@@ -215,6 +219,177 @@ class TestChartAreaInterference(TestCase):
         for description, ascii_rows, expected in extract_series_interference_data:
             with self.subTest(case=description):
                 self.assertEqual(_read_ascii_chart(ascii_rows), expected, description)
+
+
+def _build_synthetic_chart(
+    line_row: int,
+    width: int = 60,
+    height: int = 40,
+    x_offset: int = 20,
+    y_offset: int = 15,
+) -> tuple[ChartImageData, ChartGridData]:
+    """
+    A minimal ChartImageData/ChartGridData pair with one horizontal ink line at
+    `line_row` (chart_bounds-relative) spanning the full width, in light gray --
+    a color select_series_clusters' near-gray/light filter rejects outright, so
+    extract_chart_series falls back to reading the ink mask directly instead of
+    going through color-cluster resolution. That makes the fallback's ink mask
+    (legend bbox excluded) the only thing standing between "line resolves" and
+    "line don't" in the tests below: exactly what legend-bbox masking touches.
+
+    Identity x/y scales, so a resolved value equals its pixel row/column.
+    """
+    canvas_h, canvas_w = y_offset + height + 20, x_offset + width + 20
+    thresh = np.zeros((canvas_h, canvas_w), dtype=np.uint8)
+    thresh[y_offset + line_row, x_offset : x_offset + width] = 1
+
+    img = np.full((canvas_h, canvas_w, 3), 255, dtype=np.uint8)
+    img[y_offset + line_row, x_offset : x_offset + width] = (200, 200, 200)
+
+    image_data = ChartImageData(
+        img=img,
+        thresh=thresh,
+        texts=[],
+        bboxes=[],
+        columns_bboxes=[],
+        column_numbers=[],
+        rows_bboxes=[],
+        row_index=[],
+    )
+    x2, y2 = x_offset + width, y_offset + height
+    bounds = (x_offset, y_offset, x2, y2)
+    grid_data = ChartGridData(
+        default_bounds=bounds,
+        chart_bounds=bounds,
+        grid_x_lines=np.array([], dtype=int),
+        grid_y_lines=np.array([], dtype=int),
+        detected_grid_x=[],
+        detected_grid_y=[],
+        x_scale=Linear(knots=[0, canvas_w - 1], values=[0, canvas_w - 1]),
+        y_scale=Linear(knots=[0, canvas_h - 1], values=[0, canvas_h - 1]),
+    )
+    return image_data, grid_data
+
+
+class TestExtractChartSeriesLegendMasking(TestCase):
+    """
+    extract_chart_series excludes each legend entry's bbox from the ink mask
+    before resolving series (see extract_chart_series), converting it from
+    absolute image coordinates to chart_bounds-relative array indices. That
+    conversion must clip correctly whether the legend sits fully inside,
+    partially inside, or entirely outside chart_bounds -- especially the last
+    case, where an unclamped slice *stop* going negative (Python slicing reads
+    a negative stop as "N from the end", not "empty") used to zero out nearly
+    the whole mask instead of doing nothing.
+    """
+
+    WIDTH, HEIGHT, X_OFFSET, Y_OFFSET = 60, 40, 20, 15
+    LINE_ROW = 5
+
+    def _extract(self, legend_bbox):
+        image_data, grid_data = _build_synthetic_chart(
+            self.LINE_ROW, self.WIDTH, self.HEIGHT, self.X_OFFSET, self.Y_OFFSET
+        )
+        with patch("src.chart_extraction.find_legend_entries") as mocked:
+            mocked.return_value = [
+                {
+                    "bbox": legend_bbox,
+                    "text": "Legend",
+                    "name": "Legend",
+                    "color": (0, 0, 0),
+                }
+            ]
+            return extract_chart_series(image_data, grid_data, legend_area=None)
+
+    def _values_by_local_column(self, extraction):
+        """{local column: resolved value or None}, columns numbered from x_offset."""
+        return {
+            x - self.X_OFFSET: values[0]
+            for x, (_, values) in zip(extraction.x_pixels, extraction.time_series)
+        }
+
+    def test_legend_fully_inside_chart_area_masks_only_that_region(self):
+        # Absolute bbox: columns [x_offset+10, x_offset+25], rows spanning line_row.
+        legend_bbox = (
+            self.X_OFFSET + 10,
+            self.Y_OFFSET + self.LINE_ROW - 2,
+            self.X_OFFSET + 25,
+            self.Y_OFFSET + self.LINE_ROW + 2,
+        )
+        by_col = self._values_by_local_column(self._extract(legend_bbox))
+
+        for col in (0, 5, 40, self.WIDTH - 1):
+            self.assertEqual(
+                by_col[col], float(self.Y_OFFSET + self.LINE_ROW), f"column {col}"
+            )
+        for col in range(12, 24):  # comfortably inside the masked span
+            self.assertIsNone(by_col[col], f"column {col} should be masked out")
+
+    def test_legend_straddling_top_edge_masks_only_the_interior_part(self):
+        # Top is above chart_bounds, bottom is inside past line_row: exercises
+        # the pre-existing max(0, ...) clamp on the slice START.
+        legend_bbox = (
+            self.X_OFFSET + 10,
+            self.Y_OFFSET - 10,
+            self.X_OFFSET + 25,
+            self.Y_OFFSET + self.LINE_ROW + 2,
+        )
+        by_col = self._values_by_local_column(self._extract(legend_bbox))
+
+        for col in (0, 5, 40, self.WIDTH - 1):
+            self.assertEqual(
+                by_col[col], float(self.Y_OFFSET + self.LINE_ROW), f"column {col}"
+            )
+        for col in range(12, 24):
+            self.assertIsNone(by_col[col], f"column {col} should be masked out")
+
+    def test_legend_entirely_above_chart_area_does_not_corrupt_series(self):
+        # Regression: bottom is above y_offset, so (bottom - y_offset + 2) is
+        # negative. Unclamped, that slice stop wraps to "near the end" and
+        # zeroes almost the entire mask instead of nothing.
+        legend_bbox = (self.X_OFFSET + 10, 0, self.X_OFFSET + 25, self.Y_OFFSET - 5)
+        by_col = self._values_by_local_column(self._extract(legend_bbox))
+
+        for col in range(self.WIDTH):
+            self.assertEqual(
+                by_col[col], float(self.Y_OFFSET + self.LINE_ROW), f"column {col}"
+            )
+
+    def test_legend_entirely_left_of_chart_area_does_not_corrupt_series(self):
+        # Regression: right is left of x_offset, so (right - x_offset + 2) is
+        # negative -- the horizontal counterpart of the above. Rows deliberately
+        # straddle line_row so a wrongly-zeroed column range would actually be
+        # caught: the row bounds alone are valid/positive here (0 <= 8 <= 40),
+        # so only the column clamp is under test.
+        legend_bbox = (
+            0,
+            self.Y_OFFSET + self.LINE_ROW - 2,
+            self.X_OFFSET - 5,
+            self.Y_OFFSET + self.LINE_ROW + 2,
+        )
+        by_col = self._values_by_local_column(self._extract(legend_bbox))
+
+        for col in range(self.WIDTH):
+            self.assertEqual(
+                by_col[col], float(self.Y_OFFSET + self.LINE_ROW), f"column {col}"
+            )
+
+    def test_legend_entirely_below_and_right_of_chart_area_is_ignored(self):
+        # Sanity check: a legend past the bottom/right edge was never buggy
+        # (positive slice bounds beyond the array just clip to empty), but a
+        # regression here would mean the clamp fix broke the normal case.
+        legend_bbox = (
+            self.X_OFFSET + self.WIDTH + 5,
+            self.Y_OFFSET + self.HEIGHT + 5,
+            self.X_OFFSET + self.WIDTH + 15,
+            self.Y_OFFSET + self.HEIGHT + 15,
+        )
+        by_col = self._values_by_local_column(self._extract(legend_bbox))
+
+        for col in range(self.WIDTH):
+            self.assertEqual(
+                by_col[col], float(self.Y_OFFSET + self.LINE_ROW), f"column {col}"
+            )
 
 
 class TestStepShapedSeries(TestCase):
