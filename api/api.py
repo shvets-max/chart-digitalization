@@ -15,7 +15,16 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from src.chart_extraction import ChartExtraction, build_axis_ticks, extract_chart
+from src.chart_extraction import (
+    ChartExtraction,
+    ChartGridData,
+    ChartImageData,
+    build_axis_ticks,
+    compute_chart_grid,
+    extract_chart_series,
+    prepare_chart_image,
+    set_chart_bounds,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,12 +53,23 @@ class AreaBody(BaseModel):
 
 @dataclass
 class StoredChart:
-    """One processed upload: the original bytes plus its extraction result."""
+    """
+    One processed upload: the original bytes plus every extraction stage's result.
+
+    `image_data` and `grid_data` are cached so that re-running extraction after a
+    legend-area change reuses both outright (only series extraction is re-run),
+    and after a chart-area change reuses `image_data` plus `grid_data`'s fitted
+    grid lines/scales -- only `grid_data.chart_bounds` moves (see
+    `set_chart_bounds`), so neither OCR/axis-label detection nor grid detection/
+    scale fitting are re-run.
+    """
 
     chart_id: str
     filename: str
     media_type: str
     image_bytes: bytes
+    image_data: ChartImageData
+    grid_data: ChartGridData
     extraction: ChartExtraction
     chart_area_override: Optional[tuple[float, float, float, float]] = None
     legend_area_override: Optional[tuple[float, float, float, float]] = None
@@ -128,32 +148,75 @@ def _series_payload(extraction: ChartExtraction) -> list[dict]:
     return series
 
 
-def _extract_from_bytes(
-    image_bytes: bytes,
-    suffix: str,
-    chart_area: Optional[tuple[float, float, float, float]] = None,
-    legend_area: Optional[tuple[float, float, float, float]] = None,
-    label: str = "upload",
-) -> ChartExtraction:
-    """Stage `image_bytes` to a temp file (extract_chart reads from disk) and run extraction."""
+def _http_422(error: Exception, label: str) -> HTTPException:
+    logger.exception("Extraction failed for %s", label)
+    return HTTPException(
+        422,
+        "Could not digitalize this image: the axes, their labels or the "
+        "plotted line could not be recognised "
+        f"({type(error).__name__}: {error}).",
+    )
+
+
+def _prepare_from_bytes(
+    image_bytes: bytes, suffix: str, label: str = "upload"
+) -> ChartImageData:
+    """Stage `image_bytes` to a temp file (OCR reads from disk) and run OCR/axis detection."""
     handle, temp_path = tempfile.mkstemp(suffix=suffix)
     try:
         with os.fdopen(handle, "wb") as temp_file:
             temp_file.write(image_bytes)
         try:
-            return extract_chart(
-                temp_path, chart_area=chart_area, legend_area=legend_area
-            )
-        except Exception as error:  # extraction fails on charts it cannot read
-            logger.exception("Extraction failed for %s", label)
-            raise HTTPException(
-                422,
-                "Could not digitalize this image: the axes, their labels or the "
-                "plotted line could not be recognised "
-                f"({type(error).__name__}: {error}).",
-            ) from error
+            return prepare_chart_image(temp_path)
+        except Exception as error:  # OCR/axis detection fails on charts it cannot read
+            raise _http_422(error, label) from error
     finally:
         os.unlink(temp_path)
+
+
+def _compute_grid_and_series(
+    image_data: ChartImageData, label: str = "upload"
+) -> tuple[ChartGridData, ChartExtraction]:
+    """Fit the default grid/scales and extract series for a freshly uploaded image."""
+    try:
+        grid_data = compute_chart_grid(image_data)
+        extraction = extract_chart_series(image_data, grid_data, None)
+        return grid_data, extraction
+    except Exception as error:
+        raise _http_422(error, label) from error
+
+
+def _set_bounds_and_extract(
+    image_data: ChartImageData,
+    grid_data: ChartGridData,
+    chart_area: Optional[tuple[float, float, float, float]],
+    legend_area: Optional[tuple[float, float, float, float]],
+    label: str = "upload",
+) -> tuple[ChartGridData, ChartExtraction]:
+    """
+    Move `grid_data.chart_bounds` to `chart_area` (or the auto-detected default)
+    and re-run series extraction -- reusing the already-fitted grid/scales
+    rather than re-detecting them.
+    """
+    try:
+        grid_data = set_chart_bounds(grid_data, chart_area)
+        extraction = extract_chart_series(image_data, grid_data, legend_area)
+        return grid_data, extraction
+    except Exception as error:
+        raise _http_422(error, label) from error
+
+
+def _extract_series(
+    image_data: ChartImageData,
+    grid_data: ChartGridData,
+    legend_area: Optional[tuple[float, float, float, float]],
+    label: str = "upload",
+) -> ChartExtraction:
+    """Run only the series stage, reusing an already-computed `grid_data`."""
+    try:
+        return extract_chart_series(image_data, grid_data, legend_area)
+    except Exception as error:
+        raise _http_422(error, label) from error
 
 
 def _chart_payload(
@@ -225,7 +288,8 @@ async def create_chart(
             413, f"Image exceeds {MAX_UPLOAD_BYTES // (1024 * 1024)} MB"
         )
 
-    extraction = _extract_from_bytes(image_bytes, suffix, label=file.filename)
+    image_data = _prepare_from_bytes(image_bytes, suffix, label=file.filename)
+    grid_data, extraction = _compute_grid_and_series(image_data, label=file.filename)
 
     if not extraction.time_series:
         raise HTTPException(422, "No data points could be extracted from this image")
@@ -235,6 +299,8 @@ async def create_chart(
         filename=file.filename or "chart",
         media_type=file.content_type or "image/png",
         image_bytes=image_bytes,
+        image_data=image_data,
+        grid_data=grid_data,
         extraction=extraction,
     )
     store.add(chart)
@@ -281,17 +347,13 @@ def set_legend_area(
     highlighted region), or -- if `area` is omitted/null -- back to the default
     top-left corner. Everything downstream of legend detection (series-to-name
     matching, series color separation) is recomputed too. Any chart-area
-    override set via PUT .../chart-area is preserved.
+    override set via PUT .../chart-area is preserved. OCR and grid/scale
+    detection are reused unchanged rather than re-run.
     """
     chart = store.get(chart_id)
     legend_area = (area.x1, area.y1, area.x2, area.y2) if area else None
-    suffix = os.path.splitext(chart.filename)[1].lower() or ".png"
-    extraction = _extract_from_bytes(
-        chart.image_bytes,
-        suffix,
-        chart_area=chart.chart_area_override,
-        legend_area=legend_area,
-        label=chart.filename,
+    extraction = _extract_series(
+        chart.image_data, chart.grid_data, legend_area, label=chart.filename
     )
     if not extraction.time_series:
         raise HTTPException(422, "No data points could be extracted from this image")
@@ -317,22 +379,24 @@ def set_chart_area(
     """
     Re-run extraction with the plot area fixed to `area` (the user-highlighted
     region), or -- if `area` is omitted/null -- back to auto-detection. Series
-    extraction, grid detection and the legend's default search region (which is
-    itself derived from the plot area) are all recomputed too. Any legend-area
-    override set via PUT .../legend-area is preserved.
+    extraction and the legend's default search region (which is itself derived
+    from the plot area) are recomputed too. Any legend-area override set via
+    PUT .../legend-area is preserved. OCR, axis-label detection and grid
+    detection/scale fitting are reused unchanged -- only which sub-region gets
+    cropped for series extraction moves.
     """
     chart = store.get(chart_id)
     chart_area = (area.x1, area.y1, area.x2, area.y2) if area else None
-    suffix = os.path.splitext(chart.filename)[1].lower() or ".png"
-    extraction = _extract_from_bytes(
-        chart.image_bytes,
-        suffix,
-        chart_area=chart_area,
-        legend_area=chart.legend_area_override,
+    grid_data, extraction = _set_bounds_and_extract(
+        chart.image_data,
+        chart.grid_data,
+        chart_area,
+        chart.legend_area_override,
         label=chart.filename,
     )
     if not extraction.time_series:
         raise HTTPException(422, "No data points could be extracted from this image")
+    chart.grid_data = grid_data
     chart.extraction = extraction
     chart.chart_area_override = chart_area
     return _chart_payload(chart, grid_source, x_ticks, y_ticks)
