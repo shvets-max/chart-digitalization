@@ -1,6 +1,6 @@
 import os
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Optional
 
@@ -247,6 +247,319 @@ def build_axis_ticks(
     return {"x": x_ticks, "y": y_ticks}
 
 
+@dataclass
+class ChartImageData:
+    """
+    OCR and axis-label detection results for one image.
+
+    Independent of `chart_area`/`legend_area`, so it only needs computing once per
+    image no matter how many times chart_area or legend_area are re-picked.
+    """
+
+    img: np.ndarray  # full-resolution BGR source image
+    thresh: np.ndarray  # whole-image ink mask, (gray < 250)
+    texts: list[str]  # every OCR'd token
+    bboxes: list  # (left, top, right, bottom) per token, aligned with `texts`
+    columns_bboxes: list  # bboxes of the chosen y-axis tick-label group
+    column_numbers: list[float]  # parsed value per entry in `columns_bboxes`
+    rows_bboxes: list  # bboxes of the chosen x-axis tick-label group
+    row_index: list[datetime]  # parsed value per entry in `rows_bboxes`
+
+
+@dataclass
+class ChartGridData:
+    """
+    Grid lines and axis scales fitted once against the auto-detected default
+    plot area, plus the currently selected plot area.
+
+    Every field except `chart_bounds` is fitted against the auto-detected
+    default plot area (see `compute_chart_grid`) and never changes afterwards,
+    no matter what `chart_area` the user later picks -- a user selection only
+    ever moves `chart_bounds`, via `set_chart_bounds`, which is cheap because it
+    does not re-run grid detection or scale fitting. `grid_x_lines`/
+    `grid_y_lines` are stored in absolute image coordinates for this reason:
+    they outlive any one `chart_bounds` and get re-cropped to it on demand (see
+    `_chart_area_grid`) instead of being recomputed.
+    """
+
+    default_bounds: tuple[int, int, int, int]  # (x_offset, y_offset, x2, y2) of
+    # the auto-detected default plot area the grid/scales were fitted against
+    chart_bounds: tuple[int, int, int, int]  # currently selected plot area --
+    # the only field `set_chart_bounds` changes
+    grid_x_lines: np.ndarray  # absolute image x coordinates that are part of a
+    # vertical grid line
+    grid_y_lines: np.ndarray  # absolute image y coordinates that are part of a
+    # horizontal grid line
+    detected_grid_x: list[int]  # vertical grid line centers, image x coordinates
+    detected_grid_y: list[int]  # horizontal grid line centers, image y coordinates
+    x_scale: FunctionBase
+    y_scale: FunctionBase
+
+
+def prepare_chart_image(image_path: str) -> ChartImageData:
+    """OCR `image_path` and locate its axis tick labels."""
+    if not os.path.exists(image_path):
+        raise FileNotFoundError(f"Image file not found: {image_path}")
+
+    img = cv2.imread(image_path)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    texts, bboxes = ocr(gray)
+    thresh = (gray < 250).astype(np.uint8)
+
+    # Get Y-axis components
+    ids, columns_bboxes = get_column_bboxes(bboxes)
+    best_id = select_axis_tick_group(ids, texts, texts_to_numbers)
+    ids, columns_bboxes = ids[best_id], columns_bboxes[best_id]
+    column_numbers = texts_to_numbers([texts[i] for i in ids])
+
+    # Drop axis labels OCR could not parse into a number, keeping bboxes aligned
+    valid = [n is not None for n in column_numbers]
+    columns_bboxes = [box for box, ok in zip(columns_bboxes, valid) if ok]
+    column_numbers = [n for n, ok in zip(column_numbers, valid) if ok]
+
+    # Get X-axis components
+    ids, rows_bboxes = get_row_bboxes(bboxes)
+    best_id = select_axis_tick_group(ids, texts, texts_to_datetimes)
+    ids, rows_bboxes = ids[best_id], rows_bboxes[best_id]
+    row_index = texts_to_datetimes([texts[i] for i in ids])
+
+    # Drop axis labels OCR could not parse into a date, keeping bboxes aligned
+    valid = [dt is not None for dt in row_index]
+    rows_bboxes = [box for box, ok in zip(rows_bboxes, valid) if ok]
+    row_index = [dt for dt, ok in zip(row_index, valid) if ok]
+
+    return ChartImageData(
+        img=img,
+        thresh=thresh,
+        texts=texts,
+        bboxes=bboxes,
+        columns_bboxes=columns_bboxes,
+        column_numbers=column_numbers,
+        rows_bboxes=rows_bboxes,
+        row_index=row_index,
+    )
+
+
+def compute_chart_grid(image_data: ChartImageData) -> ChartGridData:
+    """
+    Locate the auto-detected default plot area, detect its grid lines and fit
+    the axis scales against it.
+
+    This is the expensive stage (grid clustering, knot adjustment, scale
+    fitting) and is fitted once, against the default plot area only -- a
+    user-selected `chart_area` never re-runs it, it only moves `chart_bounds`
+    (see `set_chart_bounds`).
+    """
+    _, location = cut_chart_area(
+        image_data.thresh, image_data.rows_bboxes, image_data.columns_bboxes
+    )
+    x_offset, y_offset, x2, y2 = location
+    chart_pixels = image_data.thresh[y_offset:y2, x_offset:x2]
+
+    # reconstruct grid components
+    grid_y_component_map = chart_pixels.mean(axis=1) > 0.5
+    grid_x_component_map = chart_pixels.mean(axis=0) > 0.5
+
+    grid_x_lines = np.nonzero(grid_x_component_map)[0] + x_offset
+    grid_y_lines = np.nonzero(grid_y_component_map)[0] + y_offset
+
+    # Adjust knots to create scales
+    y_knots = np.array([(box[1] + box[3]) / 2 for box in image_data.columns_bboxes])
+    x_knots = np.array([(box[2] + box[0]) / 2 for box in image_data.rows_bboxes])
+
+    grid_y_component_clusters = cluster_data(grid_y_lines, margin=5)
+    grid_x_component_clusters = cluster_data(grid_x_lines, margin=5)
+
+    grid_y_component_clusters_centers = [
+        round(np.mean(cluster)) for cluster in grid_y_component_clusters
+    ]
+    grid_x_component_clusters_centers = [
+        round(np.mean(cluster)) for cluster in grid_x_component_clusters
+    ]
+
+    # find the closest grid line to each knot and adjust
+    y_knots = adjust_knots_to_grid(y_knots, grid_y_component_clusters_centers)
+    x_knots = adjust_knots_to_grid(x_knots, grid_x_component_clusters_centers)
+
+    column_numbers, y_knots = drop_monotonicity_outliers(
+        np.array(image_data.column_numbers, dtype=float), y_knots
+    )
+    y_scale = create_y_scale(column_numbers, y_knots)
+    x_scale = create_x_scale(image_data.row_index, x_knots)
+
+    default_bounds = (int(x_offset), int(y_offset), int(x2), int(y2))
+    return ChartGridData(
+        default_bounds=default_bounds,
+        chart_bounds=default_bounds,
+        grid_x_lines=grid_x_lines,
+        grid_y_lines=grid_y_lines,
+        detected_grid_x=[int(px) for px in grid_x_component_clusters_centers],
+        detected_grid_y=[int(py) for py in grid_y_component_clusters_centers],
+        x_scale=x_scale,
+        y_scale=y_scale,
+    )
+
+
+def set_chart_bounds(
+    grid_data: ChartGridData,
+    chart_area: Optional[tuple[int, int, int, int]] = None,
+) -> ChartGridData:
+    """
+    Point `chart_bounds` at a user-highlighted `chart_area` (left, top, right,
+    bottom), or back at the auto-detected default when omitted.
+
+    Cheap: unlike `compute_chart_grid`, this never re-runs grid detection or
+    scale fitting -- those stay fitted against the default plot area.
+    """
+    bounds = (
+        tuple(int(round(v)) for v in chart_area)
+        if chart_area is not None
+        else grid_data.default_bounds
+    )
+    return replace(grid_data, chart_bounds=bounds)
+
+
+def _chart_area_grid(
+    image_data: ChartImageData, grid_data: ChartGridData
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Chart-pixels crop and chart_bounds-relative grid-line positions for
+    `grid_data.chart_bounds`, cropped from the already-fitted global grid
+    lines (`grid_data.grid_x_lines`/`grid_y_lines`) rather than re-detected.
+
+    Returns (chart_pixels, grid_x_component, grid_y_component_map): chart_pixels
+    is `image_data.thresh` cropped to chart_bounds with grid lines zeroed;
+    grid_x_component holds the columns and grid_y_component_map the per-row
+    boolean mask of those grid lines, both relative to chart_bounds.
+    """
+    x_offset, y_offset, x2, y2 = grid_data.chart_bounds
+    # Copied, not a view: image_data.thresh is shared/cached across chart_area
+    # re-picks, and grid removal below must not mutate it.
+    chart_pixels = image_data.thresh[y_offset:y2, x_offset:x2].copy()
+
+    grid_x_lines = grid_data.grid_x_lines
+    grid_y_lines = grid_data.grid_y_lines
+    grid_x_component = (
+        grid_x_lines[(grid_x_lines >= x_offset) & (grid_x_lines < x2)] - x_offset
+    )
+    grid_y_rows = (
+        grid_y_lines[(grid_y_lines >= y_offset) & (grid_y_lines < y2)] - y_offset
+    )
+    grid_y_component_map = np.zeros(y2 - y_offset, dtype=bool)
+    grid_y_component_map[grid_y_rows] = True
+
+    chart_pixels[grid_y_rows, :] = 0
+    chart_pixels[:, grid_x_component] = 0
+    return chart_pixels, grid_x_component, grid_y_component_map
+
+
+def extract_chart_series(
+    image_data: ChartImageData,
+    grid_data: ChartGridData,
+    legend_area: Optional[tuple[int, int, int, int]] = None,
+) -> ChartExtraction:
+    """
+    Detect the legend, separate series ink by color and resolve each series.
+
+    `legend_area` (left, top, right, bottom) restricts legend detection to a
+    user-highlighted region, e.g. when the legend sits somewhere other than the
+    default top-left corner. Omit to search the default corner.
+    """
+    x_offset, y_offset, x2, y2 = grid_data.chart_bounds
+    chart_pixels, grid_x_component, grid_y_component_map = _chart_area_grid(
+        image_data, grid_data
+    )
+
+    # A legend (if any) must be detected before color separation, not after: small
+    # text is mostly anti-aliased blur, and its scattered pale pixels can otherwise
+    # piece together into a spurious "series" of their own (see
+    # multiline.find_legend_entries). Its bbox is excluded from the ink mask used
+    # for color clustering below.
+    legend_search_area = (
+        legend_area
+        if legend_area is not None
+        else default_legend_search_area(grid_data.chart_bounds)
+    )
+    legend_entries = find_legend_entries(
+        image_data.texts,
+        image_data.bboxes,
+        grid_data.chart_bounds,
+        image_data.img,
+        search_area=legend_search_area,
+    )
+    ink_mask = chart_pixels.astype(bool)
+    for entry in legend_entries:
+        left, top, right, bottom = entry["bbox"]
+        ink_mask[
+            max(0, top - y_offset - 2) : bottom - y_offset + 2,
+            max(0, left - x_offset - 2) : right - x_offset + 2,
+        ] = False
+
+    # Separate ink by color: a chart may hold several distinctly colored lines, but
+    # value badges, watermarks and stray markers are also colored ink (see
+    # multiline.cluster_ink_colors and select_series_clusters below for how
+    # genuine series lines are told apart from those).
+    color_chart_area = image_data.img[y_offset:y2, x_offset:x2]
+    ink_clusters = cluster_ink_colors(color_chart_area, ink_mask)
+    series_clusters = select_series_clusters(
+        ink_clusters,
+        grid_y_component_map,
+        grid_x_component,
+        y_offset,
+        allowed_margin=5,
+    )
+
+    if series_clusters:
+        width = chart_pixels.shape[1]
+        time_series = [
+            (
+                grid_data.x_scale(x + x_offset),
+                [
+                    None
+                    if cluster["rows"][x] is None
+                    else grid_data.y_scale(cluster["rows"][x])
+                    for cluster in series_clusters
+                ],
+            )
+            for x in range(width)
+        ]
+        series_colors = [cluster["color"] for cluster in series_clusters]
+    else:
+        # Nothing resolved via color separation (e.g. an unusually faint or broken
+        # line): fall back to reading the whole ink mask (legend excluded) as a
+        # single series.
+        time_series = extract_time_series_from_chart_area(
+            ink_mask,
+            grid_data.x_scale,
+            grid_data.y_scale,
+            grid_x_component,
+            grid_y_component_map,
+            x_offset,
+            y_offset,
+            allowed_margin=5,
+            reversed=False,
+        )
+        series_colors = [ink_clusters[0]["color"]] if ink_clusters else [(0, 0, 0)]
+    time_series = fill_gaps_in_time_series(time_series, window_size=5)
+
+    series_names = match_series_to_legend(series_colors, legend_entries)
+
+    return ChartExtraction(
+        image_size=(int(image_data.img.shape[1]), int(image_data.img.shape[0])),
+        chart_area=grid_data.chart_bounds,
+        time_series=time_series,
+        x_pixels=[int(x_offset) + x for x in range(len(time_series))],
+        detected_grid_x=grid_data.detected_grid_x,
+        detected_grid_y=grid_data.detected_grid_y,
+        x_scale=grid_data.x_scale,
+        y_scale=grid_data.y_scale,
+        x_is_datetime=bool(time_series) and isinstance(time_series[0][0], datetime),
+        y_is_log=isinstance(grid_data.y_scale, Logarithmic),
+        series_names=series_names,
+        legend_area=tuple(int(round(v)) for v in legend_search_area),
+    )
+
+
 def extract_chart(
     image_path: str,
     chart_area: Optional[tuple[int, int, int, int]] = None,
@@ -261,168 +574,18 @@ def extract_chart(
     user-highlighted region, e.g. when the legend sits somewhere other than the
     default top-left corner. Omit either to auto-detect / search the default
     corner.
+
+    Runs every stage (`prepare_chart_image`, `compute_chart_grid`,
+    `set_chart_bounds`, `extract_chart_series`) unconditionally. When only
+    `chart_area` or only `legend_area` changes between re-runs on the same
+    image, call those stages directly instead and reuse the unaffected ones:
+    `prepare_chart_image` and `compute_chart_grid`'s grid/scale fitting never
+    depend on either, and `set_chart_bounds` is cheap.
     """
-    # Load image
-    if not os.path.exists(image_path):
-        raise FileNotFoundError(f"Image file not found: {image_path}")
-
-    img = cv2.imread(image_path)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    texts, bboxes = ocr(gray)
-
-    # Threshold to get the line (assuming black line on white background)
-    thresh = (gray < 250).astype(np.uint8)
-
-    # Get Y-axis components
-    ids, columns_bboxes = get_column_bboxes(bboxes)
-    best_id = select_axis_tick_group(ids, texts, texts_to_numbers)
-    ids, columns_bboxes = ids[best_id], columns_bboxes[best_id]
-    column_texts = [texts[i] for i in ids]
-    column_numbers = texts_to_numbers(column_texts)
-
-    # Drop axis labels OCR could not parse into a number, keeping bboxes aligned
-    valid = [n is not None for n in column_numbers]
-    columns_bboxes = [box for box, ok in zip(columns_bboxes, valid) if ok]
-    column_numbers = [n for n, ok in zip(column_numbers, valid) if ok]
-
-    # Get X-axis components
-    ids, rows_bboxes = get_row_bboxes(bboxes)
-    best_id = select_axis_tick_group(ids, texts, texts_to_datetimes)
-    ids, rows_bboxes = ids[best_id], rows_bboxes[best_id]
-    rows_texts = [texts[i] for i in ids]
-    row_index = texts_to_datetimes(rows_texts)
-
-    # Drop axis labels OCR could not parse into a date, keeping bboxes aligned
-    valid = [dt is not None for dt in row_index]
-    rows_bboxes = [box for box, ok in zip(rows_bboxes, valid) if ok]
-    row_index = [dt for dt, ok in zip(row_index, valid) if ok]
-
-    if chart_area is not None:
-        # User-highlighted plot area: skip auto-detection and use it as-is.
-        location = tuple(int(round(v)) for v in chart_area)
-    else:
-        _, location = cut_chart_area(thresh, rows_bboxes, columns_bboxes)
-    x_offset, y_offset, x2, y2 = location
-    chart_pixels = thresh[y_offset:y2, x_offset:x2]
-
-    # reconstruct grid components
-    grid_y_component_map = chart_pixels.mean(axis=1) > 0.5
-    grid_x_component_map = chart_pixels.mean(axis=0) > 0.5
-
-    grid_x_component = np.nonzero(grid_x_component_map)[0]
-    grid_y_component = np.nonzero(grid_y_component_map)[0]
-
-    # Adjust knots to create scales
-    y_knots = np.array([(box[1] + box[3]) / 2 for box in columns_bboxes])
-    x_knots = np.array([(box[2] + box[0]) / 2 for box in rows_bboxes])
-
-    grid_y_component_clusters = cluster_data(grid_y_component + y_offset, margin=5)
-    grid_x_component_clusters = cluster_data(grid_x_component + x_offset, margin=5)
-
-    grid_y_component_clusters_centers = [
-        round(np.mean(cluster)) for cluster in grid_y_component_clusters
-    ]
-    grid_x_component_clusters_centers = [
-        round(np.mean(cluster)) for cluster in grid_x_component_clusters
-    ]
-
-    # find the closest grid line to each knot and adjust
-    y_knots = adjust_knots_to_grid(y_knots, grid_y_component_clusters_centers)
-    x_knots = adjust_knots_to_grid(x_knots, grid_x_component_clusters_centers)
-
-    column_numbers, y_knots = drop_monotonicity_outliers(
-        np.array(column_numbers, dtype=float), y_knots
-    )
-    y_scale = create_y_scale(column_numbers, y_knots)
-    x_scale = create_x_scale(row_index, x_knots)
-
-    # Remove grid lines from chart area
-    chart_pixels[grid_y_component, :] = 0
-    chart_pixels[:, grid_x_component] = 0
-
-    # A legend (if any) must be detected before color separation, not after: small
-    # text is mostly anti-aliased blur, and its scattered pale pixels can otherwise
-    # piece together into a spurious "series" of their own (see
-    # multiline.find_legend_entries). Its bbox is excluded from the ink mask used
-    # for color clustering below.
-    chart_bounds = (x_offset, y_offset, x2, y2)
-    legend_search_area = (
-        legend_area
-        if legend_area is not None
-        else default_legend_search_area(chart_bounds)
-    )
-    legend_entries = find_legend_entries(
-        texts, bboxes, chart_bounds, img, search_area=legend_search_area
-    )
-    ink_mask = chart_pixels.astype(bool)
-    for entry in legend_entries:
-        left, top, right, bottom = entry["bbox"]
-        ink_mask[
-            max(0, top - y_offset - 2) : bottom - y_offset + 2,
-            max(0, left - x_offset - 2) : right - x_offset + 2,
-        ] = False
-
-    # Separate ink by color: a chart may hold several distinctly colored lines, but
-    # value badges, watermarks and stray markers are also colored ink (see
-    # multiline.cluster_ink_colors and select_series_clusters below for how
-    # genuine series lines are told apart from those).
-    color_chart_area = img[y_offset:y2, x_offset:x2]
-    ink_clusters = cluster_ink_colors(color_chart_area, ink_mask)
-    series_clusters = select_series_clusters(
-        ink_clusters,
-        grid_y_component_map,
-        grid_x_component,
-        y_offset,
-        allowed_margin=5,
-    )
-
-    if series_clusters:
-        width = chart_pixels.shape[1]
-        time_series = [
-            (
-                x_scale(x + x_offset),
-                [
-                    None if cluster["rows"][x] is None else y_scale(cluster["rows"][x])
-                    for cluster in series_clusters
-                ],
-            )
-            for x in range(width)
-        ]
-        series_colors = [cluster["color"] for cluster in series_clusters]
-    else:
-        # Nothing resolved via color separation (e.g. an unusually faint or broken
-        # line): fall back to reading the whole ink mask (legend excluded) as a
-        # single series.
-        time_series = extract_time_series_from_chart_area(
-            ink_mask,
-            x_scale,
-            y_scale,
-            grid_x_component,
-            grid_y_component_map,
-            x_offset,
-            y_offset,
-            allowed_margin=5,
-            reversed=False,
-        )
-        series_colors = [ink_clusters[0]["color"]] if ink_clusters else [(0, 0, 0)]
-    time_series = fill_gaps_in_time_series(time_series, window_size=5)
-
-    series_names = match_series_to_legend(series_colors, legend_entries)
-
-    return ChartExtraction(
-        image_size=(int(img.shape[1]), int(img.shape[0])),
-        chart_area=(int(x_offset), int(y_offset), int(x2), int(y2)),
-        time_series=time_series,
-        x_pixels=[int(x_offset) + x for x in range(len(time_series))],
-        detected_grid_x=[int(px) for px in grid_x_component_clusters_centers],
-        detected_grid_y=[int(py) for py in grid_y_component_clusters_centers],
-        x_scale=x_scale,
-        y_scale=y_scale,
-        x_is_datetime=bool(time_series) and isinstance(time_series[0][0], datetime),
-        y_is_log=isinstance(y_scale, Logarithmic),
-        series_names=series_names,
-        legend_area=tuple(int(round(v)) for v in legend_search_area),
-    )
+    image_data = prepare_chart_image(image_path)
+    grid_data = compute_chart_grid(image_data)
+    grid_data = set_chart_bounds(grid_data, chart_area)
+    return extract_chart_series(image_data, grid_data, legend_area)
 
 
 def extract_time_series(image_path: str) -> list:
@@ -529,7 +692,7 @@ def estimate_max_step(candidates, height: int) -> float:
     ]
     if not steps:
         return height / 2
-    return max(float(np.percentile(steps, 99)) * 4, 8.0)
+    return max(float(np.percentile(steps, 99.9)) * 4, 8.0)
 
 
 def resolve_series_pixel_rows(
