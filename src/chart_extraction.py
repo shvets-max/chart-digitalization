@@ -491,8 +491,8 @@ def extract_chart_series(
     for entry in legend_entries:
         left, top, right, bottom = entry["bbox"]
         ink_mask[
-            max(0, top - y_offset - 2) : bottom - y_offset + 2,
-            max(0, left - x_offset - 2) : right - x_offset + 2,
+            max(0, top - y_offset - 2) : max(0, bottom - y_offset + 2),
+            max(0, left - x_offset - 2) : max(0, right - x_offset + 2),
         ] = False
 
     # Separate ink by color: a chart may hold several distinctly colored lines, but
