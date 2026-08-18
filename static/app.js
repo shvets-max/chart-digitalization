@@ -7,7 +7,7 @@ const SERIES_SLOTS = [
 ];
 
 // The overlay sits on a foreign image whose own line is usually blue or black,
-// so the default starts at the orange slot to stay distinguishable from it.
+// so series colors start at the orange slot to stay distinguishable from it.
 const DEFAULT_SLOT = 1;
 
 const MIN_ZOOM = 1;
@@ -17,7 +17,6 @@ const state = {
   chart: null,
   image: null,
   ticks: { x: [], y: [] },
-  colorSlot: DEFAULT_SLOT,
   hoverIndex: null,
   hiddenSeries: new Set(),
   zoom: { scale: 1, tx: 0, ty: 0 },
@@ -84,7 +83,7 @@ const cssVar = (name) =>
   getComputedStyle(document.body).getPropertyValue(name).trim();
 
 const seriesColor = (index) =>
-  cssVar(SERIES_SLOTS[(state.colorSlot + index) % SERIES_SLOTS.length]);
+  cssVar(SERIES_SLOTS[(DEFAULT_SLOT + index) % SERIES_SLOTS.length]);
 
 /* ---------------------------------------------------------------- upload */
 
@@ -991,26 +990,6 @@ function ordinalSuffix(n) {
 
 /* --------------------------------------------------------------- controls */
 
-function buildSwatches() {
-  const container = el("swatches");
-  container.innerHTML = SERIES_SLOTS.map(
-    (slot, index) => `<button type="button" class="swatch" role="radio"
-      style="--swatch: var(${slot})" data-slot="${index}"
-      aria-label="Series colour ${index + 1}"
-      aria-checked="${index === DEFAULT_SLOT}"></button>`,
-  ).join("");
-
-  container.addEventListener("click", (event) => {
-    const button = event.target.closest(".swatch");
-    if (!button) return;
-    state.colorSlot = Number(button.dataset.slot);
-    container.querySelectorAll(".swatch").forEach((swatch) => {
-      swatch.setAttribute("aria-checked", swatch === button);
-    });
-    render();
-  });
-}
-
 function syncTickControls() {
   const usesCounts = el("opt-grid").value === "generated";
   el("tick-x-field").hidden = !usesCounts;
@@ -1103,6 +1082,5 @@ function resetZoomAndRender() {
   render();
 }
 
-buildSwatches();
 bindControls();
 syncTickControls();
