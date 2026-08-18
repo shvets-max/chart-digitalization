@@ -13,12 +13,39 @@ const DEFAULT_SLOT = 1;
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 8;
 
+// How many hand-drawn line edits Ctrl+Z can walk back.
+const MAX_EDIT_HISTORY = 10;
+
+// Distance (CSS px) within which a pointer snaps to an extracted datapoint.
+const SNAP_TOLERANCE = 10;
+
 const state = {
   chart: null,
   image: null,
   ticks: { x: [], y: [] },
   hoverIndex: null,
   hiddenSeries: new Set(),
+  // Index of the series whose popup menu is open, or null.
+  menuIndex: null,
+  modify: {
+    active: false,
+    seriesIndex: null,
+    // hiddenSeries as it was before modify mode hid everything else, restored on exit.
+    hiddenBefore: null,
+    // First clicked point of the line being drawn; null between lines.
+    // {x, y, anchor} -- anchor is a datapoint index, or null for a free point.
+    first: null,
+    cursor: null,
+    // The datapoint the pointer would snap to right now, or null.
+    snap: null,
+    // The settled two-point span awaiting Enter/Del:
+    // {from, to, lo, hi, unbroken}, where lo/hi are datapoint indices.
+    selection: null,
+  },
+  // Corrections currently applied on the server, and the snapshots undo/redo walks.
+  edits: [],
+  editHistory: [[]],
+  editIndex: 0,
   zoom: { scale: 1, tx: 0, ty: 0 },
   viewScale: 1,
   lastView: { width: 0, height: 0 },
@@ -133,7 +160,11 @@ async function showChart(chart) {
   state.chart = chart;
   state.image = await loadImage(chart.image.url);
   state.hoverIndex = null;
+  // Before clearing hiddenSeries: exiting modify mode restores the set it saved.
+  exitModifyMode();
+  closeSeriesMenu();
   state.hiddenSeries = new Set();
+  resetEditHistory();
   resetZoom();
 
   el("result-panel").hidden = false;
@@ -196,18 +227,40 @@ function renderBadges(chart) {
     .join("");
 }
 
-/* One toggle chip per extracted series; click hides/shows its line, markers and tooltip row. */
+const seriesLabel = (index) =>
+  (state.chart && state.chart.series[index] && state.chart.series[index].name) ||
+  `Series ${index + 1}`;
+
+/* One chip per extracted series; click opens its hide/modify menu. */
 function renderSeriesToggles(chart) {
   const container = el("series-toggles");
   container.innerHTML = chart.series
     .map(
-      (series, index) => `<button type="button" class="series-toggle" role="switch"
-        data-index="${index}" aria-pressed="true" style="--dot: ${seriesColor(index)}">
+      (series, index) => `<button type="button" class="series-toggle"
+        data-index="${index}" aria-haspopup="menu" aria-pressed="true"
+        style="--dot: ${seriesColor(index)}">
         <span class="dot"></span>
         <span class="name">${series.name || `Series ${index + 1}`}</span>
       </button>`,
     )
     .join("");
+  syncSeriesToggles();
+}
+
+/* Reflect state.hiddenSeries on the chips: they are rebuilt from scratch on every
+   chart update, and hiding is driven from the popup menu and by modify mode. */
+function syncSeriesToggles() {
+  for (const button of el("series-toggles").querySelectorAll(".series-toggle")) {
+    const index = Number(button.dataset.index);
+    button.setAttribute("aria-pressed", String(!state.hiddenSeries.has(index)));
+  }
+}
+
+function setSeriesHidden(index, hidden) {
+  if (hidden) state.hiddenSeries.add(index);
+  else state.hiddenSeries.delete(index);
+  syncSeriesToggles();
+  render();
 }
 
 /* Bound once in bindControls (not here): renderSeriesToggles rebuilds the
@@ -218,11 +271,29 @@ function handleSeriesToggleClick(event) {
   const button = event.target.closest(".series-toggle");
   if (!button) return;
   const index = Number(button.dataset.index);
-  const pressed = button.getAttribute("aria-pressed") === "true";
-  button.setAttribute("aria-pressed", String(!pressed));
-  if (pressed) state.hiddenSeries.add(index);
-  else state.hiddenSeries.delete(index);
-  render();
+  if (state.menuIndex === index) return closeSeriesMenu();
+  openSeriesMenu(index, button);
+}
+
+/* ------------------------------------------------------------ series menu */
+
+function openSeriesMenu(index, button) {
+  const menu = el("series-menu");
+  state.menuIndex = index;
+  el("series-menu-title").textContent = seriesLabel(index);
+  el("series-menu-hide").textContent = state.hiddenSeries.has(index) ? "Show" : "Hide";
+  menu.hidden = false;
+
+  const anchor = button.getBoundingClientRect();
+  const left = Math.min(anchor.left, window.innerWidth - menu.offsetWidth - 8);
+  const top = Math.min(anchor.bottom + 4, window.innerHeight - menu.offsetHeight - 8);
+  menu.style.left = `${Math.max(8, left)}px`;
+  menu.style.top = `${Math.max(8, top)}px`;
+}
+
+function closeSeriesMenu() {
+  state.menuIndex = null;
+  el("series-menu").hidden = true;
 }
 
 function formatNumber(value) {
@@ -314,8 +385,10 @@ function render() {
   drawAreaDragPreview(view);
   if (el("opt-scale").checked) drawNumericScale(view);
   if (el("opt-series").checked) drawSeries(view);
+  drawModifyPreview(view);
 
   updateConfirmPopup();
+  updateEditToolbar();
 }
 
 function drawPlotArea(view) {
@@ -615,6 +688,7 @@ function handleWheelZoom(event) {
 }
 
 function startPan(event) {
+  if (state.modify.active) return handleModifyClick(event);
   if (state.areaSelect.active) return startAreaInteraction(event);
   if (state.zoom.scale <= 1) return;
   state.isPanning = true;
@@ -896,6 +970,308 @@ async function sendArea(kind, area, busyMessage) {
   }
 }
 
+/* ----------------------------------------------------------- modify mode */
+/* Redrawing one series by hand. Every other series is hidden so the target line
+   is unambiguous, and each pair of clicks replaces the values across the x span
+   they cover with the straight line between them -- neither point has to sit on
+   the extracted line. Panning is suspended while modifying, since pointerdown is
+   what places a point; the zoom buttons and wheel still work. */
+
+function enterModifyMode(index) {
+  exitModifyMode();
+  if (state.areaSelect.active) setAreaSelectMode(state.areaSelect.kind, false);
+  closeSeriesMenu();
+  handlePointerLeave();
+
+  state.modify = {
+    active: true,
+    seriesIndex: index,
+    hiddenBefore: new Set(state.hiddenSeries),
+    first: null,
+    cursor: null,
+    snap: null,
+    selection: null,
+  };
+  state.hiddenSeries = new Set(
+    state.chart.series.map((_, i) => i).filter((i) => i !== index),
+  );
+  syncSeriesToggles();
+  // Drawing against a hidden overlay would be guesswork.
+  el("opt-series").checked = true;
+
+  el("modify-series").textContent = seriesLabel(index);
+  el("modify-bar").hidden = false;
+  canvas.classList.add("is-modifying");
+  updateModifyHint();
+  render();
+}
+
+function exitModifyMode() {
+  if (!state.modify.active) return;
+  state.hiddenSeries = state.modify.hiddenBefore || new Set();
+  state.modify = {
+    active: false, seriesIndex: null, hiddenBefore: null,
+    first: null, cursor: null, snap: null, selection: null,
+  };
+  syncSeriesToggles();
+  el("modify-bar").hidden = true;
+  canvas.classList.remove("is-modifying");
+  render();
+}
+
+function updateModifyHint() {
+  const { first, snap, selection } = state.modify;
+  if (selection) {
+    const count = selection.hi - selection.lo + 1;
+    const broken = selection.unbroken ? "" : " (already broken here)";
+    el("modify-hint").textContent =
+      `${count} point${count === 1 ? "" : "s"} selected${broken} — Enter draws a line, Del removes them.`;
+    return;
+  }
+  if (snap) {
+    el("modify-hint").textContent = first
+      ? "Click to end on the highlighted datapoint."
+      : "Click to start from the highlighted datapoint.";
+    return;
+  }
+  el("modify-hint").textContent = first
+    ? "Click the second point."
+    : "Click two points to select a segment.";
+}
+
+/* The extracted datapoint close enough to the pointer to snap to, or null.
+   There is one datapoint per x pixel column, so proximity has to be measured in
+   2D -- by x alone every cursor position would sit on one. Distances are compared
+   in CSS px so the snap radius stays constant regardless of zoom. */
+function snapCandidateAt(clientX, clientY) {
+  const points = state.chart.series[state.modify.seriesIndex].points;
+  if (!points.length) return null;
+
+  // Columns are 1 image px apart, so the tolerance in CSS px converts directly
+  // to how many columns on either side of the pointer could be within reach.
+  const scale = state.viewScale * state.zoom.scale;
+  const reach = Math.max(1, Math.ceil(SNAP_TOLERANCE / scale));
+  const middle = Math.round(imagePointAt(clientX, clientY).x - points[0].x_pixel);
+
+  let best = null;
+  for (let i = middle - reach; i <= middle + reach; i += 1) {
+    const point = points[i];
+    if (!point || point.y_pixel === null) continue;
+    const at = clientPointFor(point.x_pixel, point.y_pixel);
+    const distance = Math.hypot(at.x - clientX, at.y - clientY);
+    if (distance <= SNAP_TOLERANCE && (!best || distance < best.distance)) {
+      best = { index: i, x: point.x_pixel, y: point.y_pixel, distance };
+    }
+  }
+  return best;
+}
+
+/* Where a click lands: on the datapoint under the pointer if one is in range
+   (anchored, so it stays tied to that datapoint), else wherever was clicked. */
+function modifyPointAt(event) {
+  const snap = snapCandidateAt(event.clientX, event.clientY);
+  if (snap) return { x: snap.x, y: snap.y, anchor: snap.index };
+  const free = imagePointAt(event.clientX, event.clientY);
+  return { x: free.x, y: free.y, anchor: null };
+}
+
+function handleModifyClick(event) {
+  const modify = state.modify;
+  const point = modifyPointAt(event);
+  if (!modify.first) {
+    modify.selection = null;
+    modify.first = point;
+    modify.cursor = { x: point.x, y: point.y };
+  } else {
+    modify.selection = buildSelection(modify.first, point);
+    modify.first = null;
+  }
+  updateModifyHint();
+  render();
+}
+
+/* Which datapoint a placed point sits on: the one it is anchored to, else the
+   column nearest its x (datapoints are one per x pixel column). */
+function datapointIndexOf(point) {
+  if (point.anchor !== null) return point.anchor;
+  const points = state.chart.series[state.modify.seriesIndex].points;
+  return Math.round(point.x - points[0].x_pixel);
+}
+
+/* The datapoint range two placed points cover, and whether the extracted line
+   runs unbroken across it -- only an unbroken run is lit up as a segment. */
+function buildSelection(from, to) {
+  const points = state.chart.series[state.modify.seriesIndex].points;
+  if (!points.length) return null;
+  const a = datapointIndexOf(from);
+  const b = datapointIndexOf(to);
+  const lo = Math.max(0, Math.min(a, b));
+  const hi = Math.min(points.length - 1, Math.max(a, b));
+
+  let unbroken = hi > lo;
+  for (let i = lo; i <= hi && unbroken; i += 1) {
+    if (points[i].y_pixel === null) unbroken = false;
+  }
+  return { from, to, lo, hi, unbroken };
+}
+
+function clearSelection() {
+  state.modify.selection = null;
+  updateModifyHint();
+  render();
+}
+
+/* Enter and Del both consume the selection; the edit itself carries the two
+   points, so an anchored end still resolves against its datapoint server-side. */
+function applySelection(kind) {
+  const { selection, seriesIndex } = state.modify;
+  if (!selection) return;
+  const { from, to } = selection;
+  clearSelection();
+  applyEdit({
+    kind,
+    series_index: seriesIndex,
+    x1: from.x, y1: from.y, anchor1: from.anchor,
+    x2: to.x, y2: to.y, anchor2: to.anchor,
+  });
+}
+
+/* The line being drawn: a ring on the datapoint the pointer would snap to, a
+   marker on the placed start point, and a dashed rubber band between them. */
+function drawModifyPreview(view) {
+  const { active, first, cursor, snap, selection } = state.modify;
+  if (!active) return;
+  ctx.save();
+  if (selection) {
+    drawSelectionHighlight(view, selection);
+    drawModifyMarker(view, selection.from, selection.from.anchor !== null);
+    drawModifyMarker(view, selection.to, selection.to.anchor !== null);
+  }
+  if (snap) drawModifyMarker(view, snap, true);
+  if (first) {
+    const end = snap || cursor;
+    if (end) {
+      ctx.strokeStyle = cssVar("--series-1");
+      ctx.lineWidth = 2;
+      ctx.setLineDash([5, 4]);
+      ctx.beginPath();
+      ctx.moveTo(view.x(first.x), view.y(first.y));
+      ctx.lineTo(view.x(end.x), view.y(end.y));
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    drawModifyMarker(view, first, first.anchor !== null);
+  }
+  ctx.restore();
+}
+
+/* The selected run of the extracted line, as a thick translucent glow tracing the
+   exact datapoints in range. Only drawn for an unbroken run: a span with gaps in
+   it is not one continuous segment, so lighting it up would overstate what is
+   selected. */
+function drawSelectionHighlight(view, selection) {
+  if (!selection.unbroken) return;
+  const points = state.chart.series[state.modify.seriesIndex].points;
+  ctx.save();
+  ctx.strokeStyle = cssVar("--series-1");
+  ctx.globalAlpha = 0.3;
+  ctx.lineWidth = 9;
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  for (let i = selection.lo; i <= selection.hi; i += 1) {
+    const x = view.x(points[i].x_pixel);
+    const y = view.y(points[i].y_pixel);
+    if (i === selection.lo) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+/* Marker for a point on the line being drawn; anchored ones get an outer ring to
+   show they are locked to an extracted datapoint rather than free-floating. */
+function drawModifyMarker(view, point, anchored) {
+  const x = view.x(point.x);
+  const y = view.y(point.y);
+  ctx.beginPath();
+  ctx.arc(x, y, 4.5, 0, Math.PI * 2);
+  ctx.fillStyle = cssVar("--series-1");
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = cssVar("--surface-1");
+  ctx.stroke();
+  if (!anchored) return;
+  ctx.beginPath();
+  ctx.arc(x, y, 8.5, 0, Math.PI * 2);
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = cssVar("--series-1");
+  ctx.stroke();
+}
+
+/* ----------------------------------------------------------- edit history */
+/* The server holds the corrections as one replayable list, so undo/redo just
+   re-sends an earlier snapshot of that list instead of inverting an edit. */
+
+function updateEditToolbar() {
+  el("edit-undo").disabled = state.editIndex === 0;
+  el("edit-redo").disabled = state.editIndex >= state.editHistory.length - 1;
+  el("edit-delete").disabled = !state.modify.selection;
+}
+
+function resetEditHistory() {
+  state.edits = [];
+  state.editHistory = [[]];
+  state.editIndex = 0;
+}
+
+function pushEdits(edits) {
+  state.editHistory = state.editHistory.slice(0, state.editIndex + 1);
+  state.editHistory.push(edits);
+  // MAX_EDIT_HISTORY undoable moves means that many snapshots past the base one.
+  while (state.editHistory.length > MAX_EDIT_HISTORY + 1) state.editHistory.shift();
+  state.editIndex = state.editHistory.length - 1;
+}
+
+async function applyEdit(edit) {
+  pushEdits([...state.edits, edit]);
+  await sendEdits(state.editHistory[state.editIndex], "Applying the drawn line…");
+}
+
+async function undoEdit() {
+  if (!state.chart || state.editIndex === 0) return;
+  state.editIndex -= 1;
+  await sendEdits(state.editHistory[state.editIndex], "Undoing…");
+}
+
+async function redoEdit() {
+  if (!state.chart || state.editIndex >= state.editHistory.length - 1) return;
+  state.editIndex += 1;
+  await sendEdits(state.editHistory[state.editIndex], "Redoing…");
+}
+
+async function sendEdits(edits, busyMessage) {
+  setStatus(busyMessage, "busy");
+  try {
+    const response = await fetch(`/api/charts/${state.chart.id}/series-edits`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ edits }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || response.statusText);
+    state.edits = edits;
+    await updateChart(payload);
+    setStatus(
+      edits.length
+        ? `${edits.length} edit${edits.length === 1 ? "" : "s"} applied — Ctrl+Z undoes, Ctrl+Shift+Z redoes.`
+        : "No edits — showing the extracted series.",
+    );
+  } catch (error) {
+    setStatus(error.message || "Edit failed.", "error");
+  }
+}
+
 /* ------------------------------------------------------------------ hover */
 
 function pointIndexAt(clientX) {
@@ -936,6 +1312,14 @@ function showTooltip(index, clientX) {
 
 function handlePointerMove(event) {
   if (!state.chart) return;
+  if (state.modify.active) {
+    state.modify.snap = snapCandidateAt(event.clientX, event.clientY);
+    if (state.modify.first) {
+      state.modify.cursor = imagePointAt(event.clientX, event.clientY);
+    }
+    updateModifyHint();
+    return render();
+  }
   if (state.areaSelect.active) {
     if (state.areaSelect.dragging) return updateAreaInteraction(event);
     updateAreaHover(event);
@@ -950,6 +1334,11 @@ function handlePointerMove(event) {
 }
 
 function handlePointerLeave() {
+  if (state.modify.active && state.modify.snap) {
+    state.modify.snap = null;
+    updateModifyHint();
+    render();
+  }
   if (state.hoverIndex === null) return;
   state.hoverIndex = null;
   el("tooltip").hidden = true;
@@ -1035,6 +1424,24 @@ function bindControls() {
   }
 
   el("series-toggles").addEventListener("click", handleSeriesToggleClick);
+  el("series-menu-hide").addEventListener("click", () => {
+    const index = state.menuIndex;
+    closeSeriesMenu();
+    if (index !== null) setSeriesHidden(index, !state.hiddenSeries.has(index));
+  });
+  el("series-menu-modify").addEventListener("click", () => {
+    if (state.menuIndex !== null) enterModifyMode(state.menuIndex);
+  });
+  el("modify-done").addEventListener("click", exitModifyMode);
+  el("edit-undo").addEventListener("click", undoEdit);
+  el("edit-redo").addEventListener("click", redoEdit);
+  el("edit-delete").addEventListener("click", () => applySelection("delete"));
+  // Any click that is not on the menu or the chip that opened it dismisses it.
+  document.addEventListener("pointerdown", (event) => {
+    if (state.menuIndex === null) return;
+    if (event.target.closest("#series-menu, .series-toggle")) return;
+    closeSeriesMenu();
+  });
 
   for (const kind of Object.keys(AREA_KINDS)) {
     const config = AREA_KINDS[kind];
@@ -1070,12 +1477,38 @@ function bindControls() {
   el("zoom-reset").addEventListener("click", resetZoomAndRender);
 
   el("fullscreen-toggle").addEventListener("click", toggleFullscreen);
-  window.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && el("result-panel").classList.contains("is-fullscreen")) {
-      setFullscreen(false);
-    }
-  });
+  window.addEventListener("keydown", handleKeyDown);
 }
+
+/* Escape backs out of one layer at a time (menu, then the point being placed,
+   then the selection, then modify mode, then full screen) so it never closes
+   more than the user meant. */
+function handleKeyDown(event) {
+  if (isTypingTarget(event.target)) return;
+
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
+    event.preventDefault();
+    return event.shiftKey ? redoEdit() : undoEdit();
+  }
+  if (state.modify.selection && (event.key === "Delete" || event.key === "Enter")) {
+    event.preventDefault();
+    return applySelection(event.key === "Delete" ? "delete" : "line");
+  }
+
+  if (event.key !== "Escape") return;
+  if (state.menuIndex !== null) return closeSeriesMenu();
+  if (state.modify.first) {
+    state.modify.first = state.modify.cursor = null;
+    updateModifyHint();
+    return render();
+  }
+  if (state.modify.selection) return clearSelection();
+  if (state.modify.active) return exitModifyMode();
+  if (el("result-panel").classList.contains("is-fullscreen")) setFullscreen(false);
+}
+
+const isTypingTarget = (target) =>
+  ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) || target.isContentEditable;
 
 function resetZoomAndRender() {
   resetZoom();
