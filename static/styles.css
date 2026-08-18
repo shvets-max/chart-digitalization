@@ -290,18 +290,6 @@ main { max-width: 1180px; margin: 0 auto; display: grid; gap: 20px; }
 .series-toggle[aria-pressed="false"] .dot { background: var(--baseline); }
 .series-toggle[aria-pressed="false"] .name { text-decoration: line-through; }
 
-.swatches { display: flex; flex-wrap: wrap; gap: 6px; }
-.swatch {
-  width: 22px; height: 22px;
-  padding: 0;
-  border: 2px solid transparent;
-  border-radius: 50%;
-  background-clip: content-box;
-  cursor: pointer;
-}
-.swatch::after { content: ""; display: block; width: 100%; height: 100%; border-radius: 50%; background: var(--swatch); }
-.swatch[aria-checked="true"] { border-color: var(--text-primary); }
-
 /* Data table */
 .data-table { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 12px; }
 .data-table summary { cursor: pointer; font-weight: 500; }
