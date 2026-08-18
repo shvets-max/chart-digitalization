@@ -47,6 +47,19 @@
             <button type="button" class="button button-primary" id="area-confirm-accept">Confirm</button>
             <button type="button" class="button" id="area-confirm-cancel">Cancel</button>
           </div>
+          <div class="modify-bar" id="modify-bar" hidden>
+            <span>Modifying <strong id="modify-series"></strong></span>
+            <span class="modify-hint" id="modify-hint"></span>
+            <button type="button" class="button" id="modify-done">Done</button>
+          </div>
+          <div class="edit-toolbar" aria-label="Edit">
+            <button type="button" class="zoom-button" id="edit-undo"
+              data-hint="Undo &middot; Ctrl+Z" aria-label="Undo" disabled>&larr;</button>
+            <button type="button" class="zoom-button" id="edit-redo"
+              data-hint="Redo &middot; Ctrl+Shift+Z" aria-label="Redo" disabled>&rarr;</button>
+            <button type="button" class="zoom-button" id="edit-delete"
+              data-hint="Delete segment &middot; Del" aria-label="Delete segment" disabled>del</button>
+          </div>
           <div class="zoom-controls" aria-label="Zoom">
             <button type="button" class="zoom-button" id="zoom-out" aria-label="Zoom out">&minus;</button>
             <output class="zoom-level" id="zoom-level">100%</output>
@@ -58,7 +71,8 @@
         <aside class="controls" aria-label="Overlay options">
           <fieldset class="control-group">
             <legend>Series</legend>
-            <div class="series-toggles" id="series-toggles" role="group" aria-label="Toggle series visibility"></div>
+            <div class="series-toggles" id="series-toggles" role="group" aria-label="Series"></div>
+            <p class="hint">Click a series for hide and modify options.</p>
           </fieldset>
 
           <fieldset class="control-group">
@@ -147,6 +161,12 @@
       </details>
     </section>
   </main>
+
+  <div class="series-menu" id="series-menu" role="menu" hidden>
+    <p class="series-menu-title" id="series-menu-title"></p>
+    <button type="button" class="series-menu-item" id="series-menu-hide" role="menuitem">Hide</button>
+    <button type="button" class="series-menu-item" id="series-menu-modify" role="menuitem">Modify&hellip;</button>
+  </div>
 
   <script src="/static/app.js"></script>
 </body>

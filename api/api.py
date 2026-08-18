@@ -5,7 +5,7 @@ import os
 import tempfile
 import uuid
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from threading import Lock
 from typing import Optional
@@ -13,7 +13,7 @@ from typing import Optional
 from fastapi import Body, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.chart_extraction import (
     ChartExtraction,
@@ -51,6 +51,36 @@ class AreaBody(BaseModel):
     y2: float
 
 
+class SeriesEditBody(BaseModel):
+    """
+    One hand-made correction to a series, spanning the x range between two points
+    given in original-image pixel coordinates. `kind` picks what happens to that
+    span: "line" overwrites it with the straight line between the two points,
+    "delete" drops its values, leaving a gap. Neither point need sit on the
+    extracted line.
+
+    `anchor1`/`anchor2` hold the index of the extracted datapoint an endpoint was
+    snapped to, if any. An anchored endpoint is resolved from the series itself
+    when the edit is replayed, so it keeps meeting its datapoint exactly even
+    after earlier edits or a re-extraction moved it.
+    """
+
+    series_index: int
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    anchor1: Optional[int] = None
+    anchor2: Optional[int] = None
+    kind: str = Field("line", pattern="^(line|delete)$")
+
+
+class SeriesEditsBody(BaseModel):
+    """The complete set of corrections a chart should carry, replayed in order."""
+
+    edits: list[SeriesEditBody] = []
+
+
 @dataclass
 class StoredChart:
     """
@@ -73,6 +103,11 @@ class StoredChart:
     extraction: ChartExtraction
     chart_area_override: Optional[tuple[float, float, float, float]] = None
     legend_area_override: Optional[tuple[float, float, float, float]] = None
+    # `extraction.time_series` as it came out of extraction, before any hand-drawn
+    # correction. Kept so `series_edits` can be replayed from scratch on every
+    # change (including undo/redo) without re-running extraction.
+    base_time_series: list = field(default_factory=list)
+    series_edits: list[SeriesEditBody] = field(default_factory=list)
 
 
 class ChartStore:
@@ -219,6 +254,95 @@ def _extract_series(
         raise _http_422(error, label) from error
 
 
+def _endpoint_pixels(
+    extraction: ChartExtraction,
+    series: list,
+    series_index: int,
+    anchor: Optional[int],
+    x_pixel: float,
+    y_pixel: float,
+) -> tuple[float, float]:
+    """
+    Image-pixel position of one edit endpoint: the anchored datapoint's own
+    position when the user snapped to one, else the raw position they clicked.
+    Falls back to the raw position if the anchor no longer exists or that column
+    has no value, so a stale anchor degrades to a free point instead of failing.
+    """
+    if anchor is None or not 0 <= anchor < min(len(series), len(extraction.x_pixels)):
+        return x_pixel, y_pixel
+    value = series[anchor][1][series_index]
+    if value is None:
+        return x_pixel, y_pixel
+    return float(extraction.x_pixels[anchor]), float(extraction.y_pixel_at(value))
+
+
+def _apply_series_edits(
+    extraction: ChartExtraction,
+    base_time_series: list,
+    edits: list[SeriesEditBody],
+) -> list:
+    """
+    Replay `edits` in order on a copy of `base_time_series` and return the result.
+    Each edit rewrites one series at every column whose x pixel falls inside its
+    span: a "line" edit gives each column the value the straight line reads there
+    -- so the datapoints between the endpoints stop carrying their extracted values
+    and the span reads as exactly the drawn line -- while a "delete" edit clears
+    them to None, leaving a gap. y pixels are clamped to the plot area, so an
+    endpoint placed off the chart still yields a value that is on the axis.
+
+    Anchored endpoints are resolved against the series as it stands *at this point
+    in the replay*, so a line can be anchored to the result of an earlier edit.
+    """
+    series = [(x_value, list(values)) for x_value, values in base_time_series]
+    if not series:
+        return series
+
+    _, y_top, _, y_bottom = extraction.chart_area
+    y_lo, y_hi = min(y_top, y_bottom), max(y_top, y_bottom)
+    n_series = len(series[0][1])
+
+    for edit in edits:
+        if not 0 <= edit.series_index < n_series:
+            continue
+        x1, y1 = _endpoint_pixels(
+            extraction, series, edit.series_index, edit.anchor1, edit.x1, edit.y1
+        )
+        x2, y2 = _endpoint_pixels(
+            extraction, series, edit.series_index, edit.anchor2, edit.x2, edit.y2
+        )
+        x_lo, x_hi = sorted((x1, x2))
+        if edit.kind == "delete":
+            for x_pixel, (_, values) in zip(extraction.x_pixels, series):
+                if x_lo <= x_pixel <= x_hi:
+                    values[edit.series_index] = None
+            continue
+
+        # A zero-width span has no line to read values off; deleting one is fine.
+        if x1 == x2:
+            continue
+        slope = (y2 - y1) / (x2 - x1)
+        for x_pixel, (_, values) in zip(extraction.x_pixels, series):
+            if not x_lo <= x_pixel <= x_hi:
+                continue
+            y_pixel = min(max(y1 + slope * (x_pixel - x1), y_lo), y_hi)
+            values[edit.series_index] = float(extraction.y_value_at(y_pixel))
+    return series
+
+
+def _install_extraction(chart: StoredChart, extraction: ChartExtraction) -> None:
+    """
+    Adopt a freshly computed `extraction` as the chart's pristine base and replay
+    any existing corrections on top of it, so re-extraction (e.g. after a plot-area
+    change) does not silently discard hand-drawn work.
+    """
+    chart.extraction = extraction
+    chart.base_time_series = [(x, list(v)) for x, v in extraction.time_series]
+    if chart.series_edits:
+        extraction.time_series = _apply_series_edits(
+            extraction, chart.base_time_series, chart.series_edits
+        )
+
+
 def _chart_payload(
     chart: StoredChart, grid_source: str, x_count: int, y_count: int
 ) -> dict:
@@ -302,6 +426,7 @@ async def create_chart(
         image_data=image_data,
         grid_data=grid_data,
         extraction=extraction,
+        base_time_series=[(x, list(v)) for x, v in extraction.time_series],
     )
     store.add(chart)
     return _chart_payload(chart, grid_source, x_ticks, y_ticks)
@@ -357,7 +482,7 @@ def set_legend_area(
     )
     if not extraction.time_series:
         raise HTTPException(422, "No data points could be extracted from this image")
-    chart.extraction = extraction
+    _install_extraction(chart, extraction)
     chart.legend_area_override = legend_area
     return _chart_payload(chart, grid_source, x_ticks, y_ticks)
 
@@ -397,8 +522,34 @@ def set_chart_area(
     if not extraction.time_series:
         raise HTTPException(422, "No data points could be extracted from this image")
     chart.grid_data = grid_data
-    chart.extraction = extraction
+    _install_extraction(chart, extraction)
     chart.chart_area_override = chart_area
+    return _chart_payload(chart, grid_source, x_ticks, y_ticks)
+
+
+@app.put(
+    "/api/charts/{chart_id}/series-edits",
+    summary="Replace the chart's hand-drawn straight-line corrections",
+)
+def set_series_edits(
+    chart_id: str,
+    body: SeriesEditsBody = Body(..., description="The full corrections list to apply"),
+    grid_source: str = Query("generated", pattern="^(generated|detected)$"),
+    x_ticks: int = Query(8, ge=2, le=40),
+    y_ticks: int = Query(6, ge=2, le=40),
+) -> dict:
+    """
+    Overwrite the chart's corrections with `body.edits` and rebuild the series from
+    the pristine extraction plus that list. Replace (rather than append) semantics
+    let a client drive undo/redo by re-sending an earlier list, so no correction
+    ever needs an inverse operation. Edits whose `series_index` no longer exists
+    are skipped rather than rejected.
+    """
+    chart = store.get(chart_id)
+    chart.extraction.time_series = _apply_series_edits(
+        chart.extraction, chart.base_time_series, body.edits
+    )
+    chart.series_edits = list(body.edits)
     return _chart_payload(chart, grid_source, x_ticks, y_ticks)
 
 
