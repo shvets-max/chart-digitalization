@@ -81,6 +81,12 @@ class SeriesEditsBody(BaseModel):
     edits: list[SeriesEditBody] = []
 
 
+class SeriesNamesBody(BaseModel):
+    """The complete set of series display names, positional by series index."""
+
+    names: list[Optional[str]] = []
+
+
 @dataclass
 class StoredChart:
     """
@@ -108,6 +114,10 @@ class StoredChart:
     # change (including undo/redo) without re-running extraction.
     base_time_series: list = field(default_factory=list)
     series_edits: list[SeriesEditBody] = field(default_factory=list)
+    # User-renamed/swapped series display names, positional by series index.
+    # Survives re-extraction by index; a name past the new series count is
+    # simply unused rather than an error.
+    series_names_override: list[Optional[str]] = field(default_factory=list)
 
 
 class ChartStore:
@@ -148,10 +158,15 @@ def _x_value(value):
     return None if value is None else float(value)
 
 
-def _series_payload(extraction: ChartExtraction) -> list[dict]:
+def _series_payload(
+    extraction: ChartExtraction, names_override: Optional[list[Optional[str]]] = None
+) -> list[dict]:
     """
     Extracted series as drawable point lists. Every point carries both its pixel
     position in the original image and its value on the chart axes.
+
+    `names_override` replaces a series' display name by index (rename/swap), when
+    the override at that index is present and non-empty.
     """
     if not extraction.time_series:
         return []
@@ -179,6 +194,8 @@ def _series_payload(extraction: ChartExtraction) -> list[dict]:
             if index < len(extraction.series_names)
             else None
         )
+        if names_override and index < len(names_override) and names_override[index]:
+            name = names_override[index]
         series.append({"name": name or f"series {index + 1}", "points": points})
     return series
 
@@ -379,7 +396,7 @@ def _chart_payload(
             "y_min": v_min,
             "y_max": v_max,
         },
-        "series": _series_payload(extraction),
+        "series": _series_payload(extraction, chart.series_names_override),
         "legend_matches": sum(1 for name in extraction.series_names if name),
         "ticks": build_axis_ticks(extraction, grid_source, x_count, y_count),
         "detected_grid": {
@@ -553,6 +570,30 @@ def set_series_edits(
     return _chart_payload(chart, grid_source, x_ticks, y_ticks)
 
 
+@app.put(
+    "/api/charts/{chart_id}/series-names",
+    summary="Replace the chart's series display names (rename or swap)",
+)
+def set_series_names(
+    chart_id: str,
+    body: SeriesNamesBody = Body(
+        ..., description="The full display-names list, positional by series index"
+    ),
+    grid_source: str = Query("generated", pattern="^(generated|detected)$"),
+    x_ticks: int = Query(8, ge=2, le=40),
+    y_ticks: int = Query(6, ge=2, le=40),
+) -> dict:
+    """
+    Overwrite the chart's series names with `body.names`, positional by series
+    index. A single rename sends the current names with one entry changed; a
+    swap sends them with two entries exchanged -- both are just a full
+    replacement, so neither needs its own representation.
+    """
+    chart = store.get(chart_id)
+    chart.series_names_override = list(body.names)
+    return _chart_payload(chart, grid_source, x_ticks, y_ticks)
+
+
 @app.get("/api/charts/{chart_id}/image", summary="Original uploaded image")
 def get_image(chart_id: str) -> Response:
     chart = store.get(chart_id)
@@ -562,7 +603,7 @@ def get_image(chart_id: str) -> Response:
 @app.get("/api/charts/{chart_id}/series.csv", summary="Extracted series as CSV")
 def get_series_csv(chart_id: str) -> Response:
     chart = store.get(chart_id)
-    series = _series_payload(chart.extraction)
+    series = _series_payload(chart.extraction, chart.series_names_override)
     if not series:
         raise HTTPException(404, "This chart has no extracted series")
 

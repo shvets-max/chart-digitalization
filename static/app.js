@@ -27,6 +27,10 @@ const state = {
   hiddenSeries: new Set(),
   // Index of the series whose popup menu is open, or null.
   menuIndex: null,
+  // Index of the series highlighted by hovering its sidebar chip, or null.
+  hoverSeriesIndex: null,
+  // Index of the series chip currently being dragged (to swap names), or null.
+  dragSeriesIndex: null,
   modify: {
     active: false,
     seriesIndex: null,
@@ -160,6 +164,8 @@ async function showChart(chart) {
   state.chart = chart;
   state.image = await loadImage(chart.image.url);
   state.hoverIndex = null;
+  state.hoverSeriesIndex = null;
+  state.dragSeriesIndex = null;
   // Before clearing hiddenSeries: exiting modify mode restores the set it saved.
   exitModifyMode();
   closeSeriesMenu();
@@ -231,20 +237,33 @@ const seriesLabel = (index) =>
   (state.chart && state.chart.series[index] && state.chart.series[index].name) ||
   `Series ${index + 1}`;
 
-/* One chip per extracted series; click opens its hide/modify menu. */
+/* One chip per extracted series; click opens its hide/rename/modify menu,
+   hovering highlights its line on the chart, and dragging it onto another
+   swaps their names. */
 function renderSeriesToggles(chart) {
   const container = el("series-toggles");
   container.innerHTML = chart.series
     .map(
       (series, index) => `<button type="button" class="series-toggle"
         data-index="${index}" aria-haspopup="menu" aria-pressed="true"
-        style="--dot: ${seriesColor(index)}">
+        draggable="true" style="--dot: ${seriesColor(index)}">
         <span class="dot"></span>
         <span class="name">${series.name || `Series ${index + 1}`}</span>
       </button>`,
     )
     .join("");
+  for (const button of container.querySelectorAll(".series-toggle")) {
+    const index = Number(button.dataset.index);
+    button.addEventListener("mouseenter", () => setHoverSeries(index));
+    button.addEventListener("mouseleave", () => setHoverSeries(null));
+  }
   syncSeriesToggles();
+}
+
+function setHoverSeries(index) {
+  if (state.hoverSeriesIndex === index) return;
+  state.hoverSeriesIndex = index;
+  render();
 }
 
 /* Reflect state.hiddenSeries on the chips: they are rebuilt from scratch on every
@@ -280,6 +299,7 @@ function handleSeriesToggleClick(event) {
 function openSeriesMenu(index, button) {
   const menu = el("series-menu");
   state.menuIndex = index;
+  closeRenameField();
   el("series-menu-title").textContent = seriesLabel(index);
   el("series-menu-hide").textContent = state.hiddenSeries.has(index) ? "Show" : "Hide";
   menu.hidden = false;
@@ -294,6 +314,119 @@ function openSeriesMenu(index, button) {
 function closeSeriesMenu() {
   state.menuIndex = null;
   el("series-menu").hidden = true;
+  closeRenameField();
+}
+
+/* ----------------------------------------------------------- series rename */
+
+/* Swaps the menu's action list for a text field pre-filled with the current
+   name, in place -- no separate dialog needed for a one-field edit. */
+function openRenameField(index) {
+  el("series-menu-title").hidden = true;
+  el("series-menu-hide").hidden = true;
+  el("series-menu-rename-open").hidden = true;
+  el("series-menu-modify").hidden = true;
+  const rename = el("series-menu-rename");
+  rename.hidden = false;
+  const input = el("series-rename-input");
+  input.value = seriesLabel(index);
+  input.focus();
+  input.select();
+}
+
+function closeRenameField() {
+  el("series-menu-title").hidden = false;
+  el("series-menu-hide").hidden = false;
+  el("series-menu-rename-open").hidden = false;
+  el("series-menu-modify").hidden = false;
+  el("series-menu-rename").hidden = true;
+}
+
+async function saveRename() {
+  const index = state.menuIndex;
+  const name = el("series-rename-input").value.trim();
+  closeSeriesMenu();
+  if (index === null || !name || name === seriesLabel(index)) return;
+  const names = state.chart.series.map((s) => s.name);
+  names[index] = name;
+  await putSeriesNames(names, "Renaming series…", `Renamed to "${name}".`);
+}
+
+/* Exchanges two series' display names -- the underlying extracted lines and
+   their data stay put, only the labels move, fixing a legend mismatch. */
+async function swapSeriesNames(a, b) {
+  const names = state.chart.series.map((s) => s.name);
+  [names[a], names[b]] = [names[b], names[a]];
+  await putSeriesNames(names, "Swapping series names…", "Swapped series names.");
+}
+
+async function putSeriesNames(names, busyMessage, doneMessage) {
+  if (!state.chart) return;
+  setStatus(busyMessage, "busy");
+  try {
+    const response = await fetch(`/api/charts/${state.chart.id}/series-names`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ names }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || response.statusText);
+    await updateChart(payload);
+    setStatus(doneMessage);
+  } catch (error) {
+    setStatus(error.message || "Renaming failed.", "error");
+  }
+}
+
+/* ------------------------------------------------------ series drag-to-swap */
+
+function handleSeriesDragStart(event) {
+  const button = event.target.closest(".series-toggle");
+  if (!button) return;
+  state.dragSeriesIndex = Number(button.dataset.index);
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("text/plain", button.dataset.index);
+  button.classList.add("is-dragging");
+}
+
+function handleSeriesDragOver(event) {
+  if (state.dragSeriesIndex === null) return;
+  const button = event.target.closest(".series-toggle");
+  if (!button) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "move";
+  if (Number(button.dataset.index) === state.dragSeriesIndex) return;
+  clearSeriesDropTargets();
+  button.classList.add("is-drop-target");
+}
+
+function handleSeriesDragLeave(event) {
+  const button = event.target.closest(".series-toggle");
+  if (button) button.classList.remove("is-drop-target");
+}
+
+function handleSeriesDrop(event) {
+  event.preventDefault();
+  const fromIndex = state.dragSeriesIndex;
+  const button = event.target.closest(".series-toggle");
+  endSeriesDrag();
+  if (fromIndex === null || !button) return;
+  const toIndex = Number(button.dataset.index);
+  if (toIndex !== fromIndex) swapSeriesNames(fromIndex, toIndex);
+}
+
+function endSeriesDrag() {
+  state.dragSeriesIndex = null;
+  clearSeriesDropTargets();
+  for (const button of el("series-toggles").querySelectorAll(".is-dragging")) {
+    button.classList.remove("is-dragging");
+  }
+}
+
+function clearSeriesDropTargets() {
+  for (const button of el("series-toggles").querySelectorAll(".is-drop-target")) {
+    button.classList.remove("is-drop-target");
+  }
 }
 
 function formatNumber(value) {
@@ -579,10 +712,13 @@ function drawSeries(view) {
 
   state.chart.series.forEach((series, index) => {
     if (state.hiddenSeries.has(index)) return;
+    // Hovering a series' sidebar chip lights up its line and dims the rest.
+    const hovered = state.hoverSeriesIndex === index;
+    const dimmed = state.hoverSeriesIndex !== null && !hovered;
     // A surface-coloured halo under the stroke keeps it legible on busy images.
     for (const pass of [
-      { color: cssVar("--surface-1"), width: 4.5, alpha: 0.65 },
-      { color: seriesColor(index), width: 2, alpha: 1 },
+      { color: cssVar("--surface-1"), width: hovered ? 6 : 4.5, alpha: dimmed ? 0.3 : 0.65 },
+      { color: seriesColor(index), width: hovered ? 3.5 : 2, alpha: dimmed ? 0.35 : 1 },
     ]) {
       ctx.strokeStyle = pass.color;
       ctx.lineWidth = pass.width;
@@ -690,6 +826,11 @@ function handleWheelZoom(event) {
 function startPan(event) {
   if (state.modify.active) return handleModifyClick(event);
   if (state.areaSelect.active) return startAreaInteraction(event);
+  const hit = hitTestSeriesAt(event.clientX, event.clientY);
+  if (hit) {
+    const { seriesIndex, point } = hit;
+    return enterModifyMode(seriesIndex, { x: point.x, y: point.y, anchor: point.index });
+  }
   if (state.zoom.scale <= 1) return;
   state.isPanning = true;
   state.panPointerId = event.pointerId;
@@ -977,7 +1118,11 @@ async function sendArea(kind, area, busyMessage) {
    the extracted line. Panning is suspended while modifying, since pointerdown is
    what places a point; the zoom buttons and wheel still work. */
 
-function enterModifyMode(index) {
+/* `seedPoint`, if given, anchors the first point of the line being drawn to
+   wherever the pointer was clicked to select the series in the first place --
+   so clicking straight on a drawn line both selects it and starts editing
+   from that spot, instead of requiring a separate first click afterwards. */
+function enterModifyMode(index, seedPoint) {
   exitModifyMode();
   if (state.areaSelect.active) setAreaSelectMode(state.areaSelect.kind, false);
   closeSeriesMenu();
@@ -1002,6 +1147,13 @@ function enterModifyMode(index) {
   el("modify-series").textContent = seriesLabel(index);
   el("modify-bar").hidden = false;
   canvas.classList.add("is-modifying");
+  // Clears any inline cursor left by hovering a line before entering modify mode,
+  // so the .is-modifying crosshair (set in CSS) takes over.
+  canvas.style.cursor = "";
+  if (seedPoint) {
+    state.modify.first = seedPoint;
+    state.modify.cursor = { x: seedPoint.x, y: seedPoint.y };
+  }
   updateModifyHint();
   render();
 }
@@ -1039,12 +1191,12 @@ function updateModifyHint() {
     : "Click two points to select a segment.";
 }
 
-/* The extracted datapoint close enough to the pointer to snap to, or null.
+/* The datapoint of `seriesIndex` closest to the pointer, if within SNAP_TOLERANCE.
    There is one datapoint per x pixel column, so proximity has to be measured in
    2D -- by x alone every cursor position would sit on one. Distances are compared
    in CSS px so the snap radius stays constant regardless of zoom. */
-function snapCandidateAt(clientX, clientY) {
-  const points = state.chart.series[state.modify.seriesIndex].points;
+function nearestPointOnSeries(seriesIndex, clientX, clientY) {
+  const points = state.chart.series[seriesIndex].points;
   if (!points.length) return null;
 
   // Columns are 1 image px apart, so the tolerance in CSS px converts directly
@@ -1063,6 +1215,28 @@ function snapCandidateAt(clientX, clientY) {
       best = { index: i, x: point.x_pixel, y: point.y_pixel, distance };
     }
   }
+  return best;
+}
+
+/* The extracted datapoint close enough to the pointer to snap to, or null --
+   restricted to the series currently being modified. */
+function snapCandidateAt(clientX, clientY) {
+  return nearestPointOnSeries(state.modify.seriesIndex, clientX, clientY);
+}
+
+/* Which visible series (if any) has a datapoint under the pointer, outside of
+   modify mode -- lets a click directly on a drawn line select it for editing.
+   Ties (overlapping lines) go to whichever series is closest to the pointer. */
+function hitTestSeriesAt(clientX, clientY) {
+  if (!state.chart) return null;
+  let best = null;
+  state.chart.series.forEach((_, index) => {
+    if (state.hiddenSeries.has(index)) return;
+    const candidate = nearestPointOnSeries(index, clientX, clientY);
+    if (candidate && (!best || candidate.distance < best.distance)) {
+      best = { seriesIndex: index, point: candidate };
+    }
+  });
   return best;
 }
 
@@ -1274,8 +1448,8 @@ async function sendEdits(edits, busyMessage) {
 
 /* ------------------------------------------------------------------ hover */
 
-function pointIndexAt(clientX) {
-  const points = state.chart.series[0].points;
+function pointIndexAt(clientX, seriesIndex = 0) {
+  const points = state.chart.series[seriesIndex].points;
   const rect = canvas.getBoundingClientRect();
   const rectX = clientX - rect.left;
   const zoom = state.zoom;
@@ -1285,11 +1459,14 @@ function pointIndexAt(clientX) {
   return index >= 0 && index < points.length ? index : null;
 }
 
-function showTooltip(index, clientX) {
+/* `onlySeriesIndex`, if given, limits the popup to that one series -- used in
+   modify mode so the popup only ever carries the value of the series being
+   edited, regardless of what else is (normally hidden, but just in case). */
+function showTooltip(index, clientX, onlySeriesIndex = null) {
   const tooltip = el("tooltip");
   const rows = state.chart.series
     .map((series, seriesIndex) => {
-      if (state.hiddenSeries.has(seriesIndex)) return "";
+      if (onlySeriesIndex !== null ? seriesIndex !== onlySeriesIndex : state.hiddenSeries.has(seriesIndex)) return "";
       const point = series.points[index];
       const value = point ? point.y_value : null;
       const label = state.chart.series.length > 1 ? `${series.name}: ` : "";
@@ -1299,7 +1476,7 @@ function showTooltip(index, clientX) {
       </div>`;
     })
     .join("");
-  const anchor = state.chart.series[0].points[index];
+  const anchor = state.chart.series[onlySeriesIndex ?? 0].points[index];
   tooltip.innerHTML = `<div class="tooltip-x">${formatX(anchor.x_value)}</div>${rows}`;
   tooltip.hidden = false;
 
@@ -1318,6 +1495,11 @@ function handlePointerMove(event) {
       state.modify.cursor = imagePointAt(event.clientX, event.clientY);
     }
     updateModifyHint();
+    // The popup follows the pointer during modify mode too, but carries only
+    // the series being edited -- every other series is anchored, not shown.
+    const index = pointIndexAt(event.clientX, state.modify.seriesIndex);
+    if (index === null) el("tooltip").hidden = true;
+    else showTooltip(index, event.clientX, state.modify.seriesIndex);
     return render();
   }
   if (state.areaSelect.active) {
@@ -1326,6 +1508,7 @@ function handlePointerMove(event) {
     return handlePointerLeave();
   }
   if (state.isPanning) return panTo(event);
+  canvas.style.cursor = hitTestSeriesAt(event.clientX, event.clientY) ? "pointer" : "";
   const index = pointIndexAt(event.clientX);
   if (index === null) return handlePointerLeave();
   state.hoverIndex = index;
@@ -1334,11 +1517,17 @@ function handlePointerMove(event) {
 }
 
 function handlePointerLeave() {
-  if (state.modify.active && state.modify.snap) {
-    state.modify.snap = null;
-    updateModifyHint();
-    render();
+  if (state.modify.active) {
+    el("tooltip").hidden = true;
+    if (state.modify.snap) {
+      state.modify.snap = null;
+      updateModifyHint();
+      render();
+    }
+    return;
   }
+  // Left alone when the area-select tool owns the cursor (updateAreaHover sets it).
+  if (!state.areaSelect.active) canvas.style.cursor = "";
   if (state.hoverIndex === null) return;
   state.hoverIndex = null;
   el("tooltip").hidden = true;
@@ -1424,10 +1613,24 @@ function bindControls() {
   }
 
   el("series-toggles").addEventListener("click", handleSeriesToggleClick);
+  el("series-toggles").addEventListener("dragstart", handleSeriesDragStart);
+  el("series-toggles").addEventListener("dragover", handleSeriesDragOver);
+  el("series-toggles").addEventListener("dragleave", handleSeriesDragLeave);
+  el("series-toggles").addEventListener("drop", handleSeriesDrop);
+  el("series-toggles").addEventListener("dragend", endSeriesDrag);
   el("series-menu-hide").addEventListener("click", () => {
     const index = state.menuIndex;
     closeSeriesMenu();
     if (index !== null) setSeriesHidden(index, !state.hiddenSeries.has(index));
+  });
+  el("series-menu-rename-open").addEventListener("click", () => {
+    if (state.menuIndex !== null) openRenameField(state.menuIndex);
+  });
+  el("series-rename-save").addEventListener("click", saveRename);
+  el("series-rename-cancel").addEventListener("click", closeSeriesMenu);
+  el("series-rename-input").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") { event.preventDefault(); saveRename(); }
+    else if (event.key === "Escape") { event.preventDefault(); closeSeriesMenu(); }
   });
   el("series-menu-modify").addEventListener("click", () => {
     if (state.menuIndex !== null) enterModifyMode(state.menuIndex);

@@ -277,6 +277,11 @@ main { max-width: 1180px; margin: 0 auto; display: grid; gap: 20px; }
   background: var(--surface-1);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.14);
 }
+/* Without this, the unconditional `display: flex` above outranks the
+   browser's default `[hidden] { display: none }` rule (author styles beat
+   UA styles regardless of specificity), so setting .hidden = true in JS would
+   have no visible effect. */
+.area-confirm[hidden] { display: none; }
 .area-confirm .button { padding: 5px 10px; font-size: 12px; }
 
 /* Banner shown while a series is being redrawn by hand. */
@@ -296,6 +301,8 @@ main { max-width: 1180px; margin: 0 auto; display: grid; gap: 20px; }
   font-size: 12px;
   line-height: 1.45;
 }
+/* Same reason as .area-confirm[hidden] above. */
+.modify-bar[hidden] { display: none; }
 .modify-bar .button { padding: 4px 10px; font-size: 12px; }
 .modify-hint { color: var(--text-secondary); }
 
@@ -353,6 +360,11 @@ main { max-width: 1180px; margin: 0 auto; display: grid; gap: 20px; }
 .series-toggle[aria-pressed="false"] .dot { background: var(--baseline); }
 .series-toggle[aria-pressed="false"] .name { text-decoration: line-through; }
 
+/* Dragging a chip to swap its name with another's. */
+.series-toggle[draggable="true"] { cursor: grab; }
+.series-toggle.is-dragging { opacity: 0.45; }
+.series-toggle.is-drop-target { border-color: var(--series-1); background: color-mix(in srgb, var(--series-1) 12%, var(--page)); }
+
 /* Per-series popup menu; fixed so it escapes the sidebar and the fullscreen panel. */
 .series-menu {
   position: fixed;
@@ -389,6 +401,21 @@ main { max-width: 1180px; margin: 0 auto; display: grid; gap: 20px; }
   cursor: pointer;
 }
 .series-menu-item:hover { background: var(--page); }
+
+.series-menu-rename { display: grid; gap: 6px; padding: 4px 6px 6px; }
+.series-menu-rename[hidden] { display: none; }
+.series-rename-input {
+  width: 100%;
+  padding: 5px 7px;
+  border: 1px solid var(--baseline);
+  border-radius: 5px;
+  background: var(--surface-1);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+}
+.series-menu-rename-actions { display: flex; gap: 6px; }
+.series-menu-rename-actions .button { flex: 1 1 auto; padding: 5px 8px; font-size: 12px; }
 
 /* Data table */
 .data-table { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 12px; }

@@ -72,7 +72,7 @@
           <fieldset class="control-group">
             <legend>Series</legend>
             <div class="series-toggles" id="series-toggles" role="group" aria-label="Series"></div>
-            <p class="hint">Click a series for hide and modify options.</p>
+            <p class="hint">Click a series for hide, rename and modify options, or click its line on the chart to modify it directly. Drag a series onto another to swap their names.</p>
           </fieldset>
 
           <fieldset class="control-group">
@@ -164,7 +164,15 @@
 
   <div class="series-menu" id="series-menu" role="menu" hidden>
     <p class="series-menu-title" id="series-menu-title"></p>
+    <div class="series-menu-rename" id="series-menu-rename" hidden>
+      <input type="text" id="series-rename-input" class="series-rename-input" aria-label="Series name">
+      <div class="series-menu-rename-actions">
+        <button type="button" class="button button-primary" id="series-rename-save">Save</button>
+        <button type="button" class="button" id="series-rename-cancel">Cancel</button>
+      </div>
+    </div>
     <button type="button" class="series-menu-item" id="series-menu-hide" role="menuitem">Hide</button>
+    <button type="button" class="series-menu-item" id="series-menu-rename-open" role="menuitem">Rename&hellip;</button>
     <button type="button" class="series-menu-item" id="series-menu-modify" role="menuitem">Modify&hellip;</button>
   </div>
 
