@@ -118,6 +118,10 @@ class StoredChart:
     # Survives re-extraction by index; a name past the new series count is
     # simply unused rather than an error.
     series_names_override: list[Optional[str]] = field(default_factory=list)
+    # Indices the user has removed from the sidebar/chart/export. Kept as a set
+    # of positions rather than dropped from the data so every other index-based
+    # reference (series_edits, series_names_override) stays valid.
+    removed_series: set[int] = field(default_factory=set)
 
 
 class ChartStore:
@@ -159,14 +163,19 @@ def _x_value(value):
 
 
 def _series_payload(
-    extraction: ChartExtraction, names_override: Optional[list[Optional[str]]] = None
+    extraction: ChartExtraction,
+    names_override: Optional[list[Optional[str]]] = None,
+    removed: Optional[set[int]] = None,
 ) -> list[dict]:
     """
     Extracted series as drawable point lists. Every point carries both its pixel
     position in the original image and its value on the chart axes.
 
     `names_override` replaces a series' display name by index (rename/swap), when
-    the override at that index is present and non-empty.
+    the override at that index is present and non-empty. `removed` flags series
+    the user has dropped; they are still returned in full (so indices stay
+    stable and callers needing the shared x-axis row, e.g. `series[0]`, keep
+    working) but carry `"removed": true` for callers to filter or grey out.
     """
     if not extraction.time_series:
         return []
@@ -196,7 +205,14 @@ def _series_payload(
         )
         if names_override and index < len(names_override) and names_override[index]:
             name = names_override[index]
-        series.append({"name": name or f"series {index + 1}", "points": points})
+        is_removed = removed is not None and index in removed
+        series.append(
+            {
+                "name": name or f"series {index + 1}",
+                "points": points,
+                "removed": is_removed,
+            }
+        )
     return series
 
 
@@ -396,7 +412,9 @@ def _chart_payload(
             "y_min": v_min,
             "y_max": v_max,
         },
-        "series": _series_payload(extraction, chart.series_names_override),
+        "series": _series_payload(
+            extraction, chart.series_names_override, chart.removed_series
+        ),
         "legend_matches": sum(1 for name in extraction.series_names if name),
         "ticks": build_axis_ticks(extraction, grid_source, x_count, y_count),
         "detected_grid": {
@@ -594,6 +612,32 @@ def set_series_names(
     return _chart_payload(chart, grid_source, x_ticks, y_ticks)
 
 
+@app.delete(
+    "/api/charts/{chart_id}/series/{series_index}",
+    summary="Drop one series from the chart, its exports and its sidebar entry",
+)
+def remove_series(
+    chart_id: str,
+    series_index: int,
+    grid_source: str = Query("generated", pattern="^(generated|detected)$"),
+    x_ticks: int = Query(8, ge=2, le=40),
+    y_ticks: int = Query(6, ge=2, le=40),
+) -> dict:
+    """
+    Mark `series_index` as removed. The series stays in the underlying data
+    (so `series_edits`/`series_names_override`, which reference it by index,
+    stay valid) but is left out of the chart, table, sidebar and CSV export.
+    """
+    chart = store.get(chart_id)
+    n_series = (
+        len(chart.extraction.time_series[0][1]) if chart.extraction.time_series else 0
+    )
+    if not 0 <= series_index < n_series:
+        raise HTTPException(404, f"Unknown series index: {series_index}")
+    chart.removed_series.add(series_index)
+    return _chart_payload(chart, grid_source, x_ticks, y_ticks)
+
+
 @app.get("/api/charts/{chart_id}/image", summary="Original uploaded image")
 def get_image(chart_id: str) -> Response:
     chart = store.get(chart_id)
@@ -603,7 +647,13 @@ def get_image(chart_id: str) -> Response:
 @app.get("/api/charts/{chart_id}/series.csv", summary="Extracted series as CSV")
 def get_series_csv(chart_id: str) -> Response:
     chart = store.get(chart_id)
-    series = _series_payload(chart.extraction, chart.series_names_override)
+    series = [
+        s
+        for s in _series_payload(
+            chart.extraction, chart.series_names_override, chart.removed_series
+        )
+        if not s["removed"]
+    ]
     if not series:
         raise HTTPException(404, "This chart has no extracted series")
 
