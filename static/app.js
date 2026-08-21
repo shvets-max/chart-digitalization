@@ -145,8 +145,9 @@ async function uploadImage(file) {
 }
 
 function countValues(chart) {
-  return chart.series.reduce(
-    (total, s) => total + s.points.filter((p) => p.y_value !== null).length, 0);
+  return chart.series
+    .filter((s) => !s.removed)
+    .reduce((total, s) => total + s.points.filter((p) => p.y_value !== null).length, 0);
 }
 
 function loadImage(url) {
@@ -170,6 +171,7 @@ async function showChart(chart) {
   exitModifyMode();
   closeSeriesMenu();
   state.hiddenSeries = new Set();
+  syncRemovedIntoHidden(chart);
   resetEditHistory();
   resetZoom();
 
@@ -192,6 +194,7 @@ async function showChart(chart) {
    without reloading the image or resetting zoom/pan -- only the chart data changed. */
 async function updateChart(chart) {
   state.chart = chart;
+  syncRemovedIntoHidden(chart);
   renderBadges(chart);
   renderSeriesToggles(chart);
   renderTable(chart);
@@ -221,7 +224,7 @@ function updateAreaHints(chart) {
 function renderBadges(chart) {
   const { axes, series, chart_area: area } = chart;
   const badges = [
-    `${series.length} series`,
+    `${series.filter((s) => !s.removed).length} series`,
     `${countValues(chart)} points`,
     axes.x_is_datetime ? "datetime x-axis" : "numeric x-axis",
     axes.y_is_log ? "log y-axis" : "linear y-axis",
@@ -237,14 +240,17 @@ const seriesLabel = (index) =>
   (state.chart && state.chart.series[index] && state.chart.series[index].name) ||
   `Series ${index + 1}`;
 
-/* One chip per extracted series; click opens its hide/rename/modify menu,
-   hovering highlights its line on the chart, and dragging it onto another
-   swaps their names. */
+/* One chip per extracted series (removed series get none); left-click toggles
+   show/hide, right-click opens the rename/modify/remove menu, hovering
+   highlights its line on the chart, and dragging it onto another swaps their
+   names. */
 function renderSeriesToggles(chart) {
   const container = el("series-toggles");
   container.innerHTML = chart.series
+    .map((series, index) => ({ series, index }))
+    .filter(({ series }) => !series.removed)
     .map(
-      (series, index) => `<button type="button" class="series-toggle"
+      ({ series, index }) => `<button type="button" class="series-toggle"
         data-index="${index}" aria-haspopup="menu" aria-pressed="true"
         draggable="true" style="--dot: ${seriesColor(index)}">
         <span class="dot"></span>
@@ -275,6 +281,14 @@ function syncSeriesToggles() {
   }
 }
 
+/* Removed series carry no chip, so they piggyback on the hiddenSeries set to
+   stay out of the draw/hit-test paths that already skip hidden indices. */
+function syncRemovedIntoHidden(chart) {
+  chart.series.forEach((series, index) => {
+    if (series.removed) state.hiddenSeries.add(index);
+  });
+}
+
 function setSeriesHidden(index, hidden) {
   if (hidden) state.hiddenSeries.add(index);
   else state.hiddenSeries.delete(index);
@@ -285,10 +299,20 @@ function setSeriesHidden(index, hidden) {
 /* Bound once in bindControls (not here): renderSeriesToggles rebuilds the
    container's innerHTML on every chart update, but the container element
    itself persists, so a listener added here would accumulate one copy per
-   update instead of being replaced. */
+   update instead of being replaced. Left-click toggles show/hide directly. */
 function handleSeriesToggleClick(event) {
   const button = event.target.closest(".series-toggle");
   if (!button) return;
+  const index = Number(button.dataset.index);
+  closeSeriesMenu();
+  setSeriesHidden(index, !state.hiddenSeries.has(index));
+}
+
+/* Right-click opens the rename/modify/remove menu instead. */
+function handleSeriesToggleContextMenu(event) {
+  const button = event.target.closest(".series-toggle");
+  if (!button) return;
+  event.preventDefault();
   const index = Number(button.dataset.index);
   if (state.menuIndex === index) return closeSeriesMenu();
   openSeriesMenu(index, button);
@@ -301,7 +325,6 @@ function openSeriesMenu(index, button) {
   state.menuIndex = index;
   closeRenameField();
   el("series-menu-title").textContent = seriesLabel(index);
-  el("series-menu-hide").textContent = state.hiddenSeries.has(index) ? "Show" : "Hide";
   menu.hidden = false;
 
   const anchor = button.getBoundingClientRect();
@@ -323,9 +346,9 @@ function closeSeriesMenu() {
    name, in place -- no separate dialog needed for a one-field edit. */
 function openRenameField(index) {
   el("series-menu-title").hidden = true;
-  el("series-menu-hide").hidden = true;
   el("series-menu-rename-open").hidden = true;
   el("series-menu-modify").hidden = true;
+  el("series-menu-remove").hidden = true;
   const rename = el("series-menu-rename");
   rename.hidden = false;
   const input = el("series-rename-input");
@@ -336,9 +359,9 @@ function openRenameField(index) {
 
 function closeRenameField() {
   el("series-menu-title").hidden = false;
-  el("series-menu-hide").hidden = false;
   el("series-menu-rename-open").hidden = false;
   el("series-menu-modify").hidden = false;
+  el("series-menu-remove").hidden = false;
   el("series-menu-rename").hidden = true;
 }
 
@@ -375,6 +398,26 @@ async function putSeriesNames(names, busyMessage, doneMessage) {
     setStatus(doneMessage);
   } catch (error) {
     setStatus(error.message || "Renaming failed.", "error");
+  }
+}
+
+/* Drops a series from the chart, table, sidebar and CSV export for good --
+   unlike hiding, this is not reversible from the UI. */
+async function removeSeries(index) {
+  if (!state.chart) return;
+  const label = seriesLabel(index);
+  if (!window.confirm(`Remove "${label}"? This can't be undone.`)) return;
+  setStatus("Removing series…", "busy");
+  try {
+    const response = await fetch(`/api/charts/${state.chart.id}/series/${index}`, {
+      method: "DELETE",
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || response.statusText);
+    await updateChart(payload);
+    setStatus(`Removed "${label}".`);
+  } catch (error) {
+    setStatus(error.message || "Removing series failed.", "error");
   }
 }
 
@@ -1539,16 +1582,17 @@ function handlePointerLeave() {
 const MAX_TABLE_ROWS = 300;
 
 function renderTable(chart) {
+  const visibleSeries = chart.series.filter((s) => !s.removed);
   const points = chart.series[0].points;
   const step = Math.max(1, Math.ceil(points.length / MAX_TABLE_ROWS));
-  const header = ["x", ...chart.series.map((s) => s.name)];
+  const header = ["x", ...visibleSeries.map((s) => s.name)];
 
   el("data-thead").innerHTML =
     `<tr>${header.map((h) => `<th>${h}</th>`).join("")}</tr>`;
 
   const rows = [];
   for (let i = 0; i < points.length; i += step) {
-    const cells = chart.series.map((s) => {
+    const cells = visibleSeries.map((s) => {
       const value = s.points[i] ? s.points[i].y_value : null;
       return `<td>${value === null ? "—" : formatNumber(value)}</td>`;
     });
@@ -1613,16 +1657,12 @@ function bindControls() {
   }
 
   el("series-toggles").addEventListener("click", handleSeriesToggleClick);
+  el("series-toggles").addEventListener("contextmenu", handleSeriesToggleContextMenu);
   el("series-toggles").addEventListener("dragstart", handleSeriesDragStart);
   el("series-toggles").addEventListener("dragover", handleSeriesDragOver);
   el("series-toggles").addEventListener("dragleave", handleSeriesDragLeave);
   el("series-toggles").addEventListener("drop", handleSeriesDrop);
   el("series-toggles").addEventListener("dragend", endSeriesDrag);
-  el("series-menu-hide").addEventListener("click", () => {
-    const index = state.menuIndex;
-    closeSeriesMenu();
-    if (index !== null) setSeriesHidden(index, !state.hiddenSeries.has(index));
-  });
   el("series-menu-rename-open").addEventListener("click", () => {
     if (state.menuIndex !== null) openRenameField(state.menuIndex);
   });
@@ -1634,6 +1674,11 @@ function bindControls() {
   });
   el("series-menu-modify").addEventListener("click", () => {
     if (state.menuIndex !== null) enterModifyMode(state.menuIndex);
+  });
+  el("series-menu-remove").addEventListener("click", () => {
+    const index = state.menuIndex;
+    closeSeriesMenu();
+    if (index !== null) removeSeries(index);
   });
   el("modify-done").addEventListener("click", exitModifyMode);
   el("edit-undo").addEventListener("click", undoEdit);

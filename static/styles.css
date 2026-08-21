@@ -401,6 +401,8 @@ main { max-width: 1180px; margin: 0 auto; display: grid; gap: 20px; }
   cursor: pointer;
 }
 .series-menu-item:hover { background: var(--page); }
+.series-menu-item-danger { color: var(--critical); }
+.series-menu-item-danger:hover { background: rgba(208, 59, 59, 0.1); }
 
 .series-menu-rename { display: grid; gap: 6px; padding: 4px 6px 6px; }
 .series-menu-rename[hidden] { display: none; }

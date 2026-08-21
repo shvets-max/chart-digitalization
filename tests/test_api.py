@@ -73,6 +73,25 @@ class TestSeriesPayload(TestCase):
         payload = _series_payload(extraction, names_override=[""])
         self.assertEqual(payload[0]["name"], "Revenue")
 
+    def test_removed_flags_the_series_but_keeps_its_points(self):
+        extraction = _extraction(
+            series_names=["Revenue", "Costs"],
+            time_series=[(0.0, [10.0, 5.0]), (1.0, [20.0, 6.0])],
+        )
+        payload = _series_payload(extraction, removed={0})
+        self.assertEqual([s["removed"] for s in payload], [True, False])
+        # Points stay in place so index-aligned callers (e.g. the shared x-axis
+        # row read off series[0]) keep working once a series is removed.
+        self.assertEqual(len(payload[0]["points"]), 2)
+
+    def test_no_removed_set_flags_nothing(self):
+        extraction = _extraction(
+            series_names=["Revenue"],
+            time_series=[(0.0, [10.0]), (1.0, [20.0])],
+        )
+        payload = _series_payload(extraction)
+        self.assertEqual(payload[0]["removed"], False)
+
 
 class TestApplySeriesEdits(TestCase):
     """
