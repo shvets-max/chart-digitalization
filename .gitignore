@@ -4,3 +4,7 @@ __pycache__/
 .ipynb_checkpoints/
 data/
 notebooks/
+
+# Eval run reports are ad-hoc/CI artifacts; only the committed baseline is tracked.
+eval/history/*.json
+!eval/history/baseline.json
