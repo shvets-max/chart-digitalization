@@ -85,8 +85,7 @@ def write_manifest(
     os.makedirs(os.path.dirname(path), exist_ok=True)
     ordered = sorted(entries, key=lambda e: (e.category, e.id))
     with open(path, "w", newline="\n") as f:
-        for entry in ordered:
-            f.write(json.dumps(asdict(entry)) + "\n")
+        f.writelines(json.dumps(asdict(entry)) + "\n" for entry in ordered)
 
 
 def load_manifest(path: str = DEFAULT_MANIFEST_PATH) -> list[ChartEntry]:

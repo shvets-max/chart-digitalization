@@ -8,3 +8,7 @@ notebooks/
 # Eval run reports are ad-hoc/CI artifacts; only the committed baseline is tracked.
 eval/history/*.json
 !eval/history/baseline.json
+
+# The dashboard is regenerated from eval/history/eval.db (which IS tracked) by
+# `python -m eval.report` -- no need to track the rendered HTML itself.
+eval/history/report.html

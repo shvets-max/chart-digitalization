@@ -5,6 +5,7 @@ metrics, optionally gating on a regression against a committed baseline.
     python -m eval.run_eval
     python -m eval.run_eval --categories linear_scaled log_scaled --out eval/history/run.json
     python -m eval.run_eval --update-baseline
+    python -m eval.run_eval --record   # also append this run to eval/history/eval.db
 """
 
 import argparse
@@ -14,9 +15,9 @@ import subprocess
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Optional
 
 from eval.align import align_extracted_to_expected
+from eval.history import DEFAULT_DB_PATH, record_run
 from eval.manifest import (
     DEFAULT_MANIFEST_PATH,
     REPO_ROOT,
@@ -85,7 +86,7 @@ def evaluate_chart(entry: ChartEntry) -> dict:
     }
 
 
-def _mean(values: list[Optional[float]]) -> Optional[float]:
+def _mean(values: list[float | None]) -> float | None:
     values = [v for v in values if v is not None]
     return sum(values) / len(values) if values else None
 
@@ -119,7 +120,7 @@ def aggregate(per_chart: list[dict]) -> dict:
 
 
 def run(
-    manifest_path: str = DEFAULT_MANIFEST_PATH, categories: Optional[list[str]] = None
+    manifest_path: str = DEFAULT_MANIFEST_PATH, categories: list[str] | None = None
 ) -> dict:
     """Evaluate every chart in the manifest (optionally filtered to `categories`)."""
     entries = load_manifest(manifest_path)
@@ -190,6 +191,14 @@ def main() -> int:
         action="store_true",
         help="Write this run's report as the new baseline (eval/history/baseline.json)",
     )
+    parser.add_argument(
+        "--record",
+        action="store_true",
+        help="Append this run's report to the eval history db (eval/history/eval.db)",
+    )
+    parser.add_argument(
+        "--db", default=DEFAULT_DB_PATH, help="History db path for --record"
+    )
     args = parser.parse_args()
 
     report = run(args.manifest, args.categories)
@@ -221,6 +230,10 @@ def main() -> int:
         with open(DEFAULT_BASELINE_PATH, "w") as f:
             json.dump(report, f, indent=2)
         print(f"\nUpdated baseline: {DEFAULT_BASELINE_PATH}")
+
+    if args.record:
+        run_id = record_run(report, args.db)
+        print(f"\nRecorded run {run_id} in {args.db}")
 
     return exit_code
 

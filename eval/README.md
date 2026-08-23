@@ -1,9 +1,11 @@
-# Accuracy eval (Phase 1 MVP)
+# Accuracy eval (Phases 1-2)
 
-Implements phase 1 of `docs/accuracy-monitoring-design.md`: a ground-truth
-manifest, a metrics harness, and a CI regression gate. Phases 2-4 (metrics
-history/dashboard, the ground-truth authoring endpoint, and the production
-feedback loop) are not built yet.
+Implements phases 1-2 of `docs/accuracy-monitoring-design.md`: a ground-truth
+manifest, a metrics harness, a CI regression gate, a SQLite metrics history,
+and a static HTML dashboard. There's no nightly job that runs the eval and
+records it automatically — `--record` is a manual/CI-triggered step for now.
+Phases 3-4 (the ground-truth authoring endpoint and the production feedback
+loop) are not built yet.
 
 ## Usage
 
@@ -20,6 +22,12 @@ python -m eval.run_eval --categories linear_scaled log_scaled --out eval/history
 
 # After an intentional accuracy change, replace the committed baseline
 python -m eval.run_eval --update-baseline
+
+# Also append this run to the metrics history db (eval/history/eval.db)
+python -m eval.run_eval --record
+
+# Regenerate the dashboard (eval/history/report.html) from the history db
+python -m eval.report
 ```
 
 ## Layout
@@ -37,6 +45,14 @@ python -m eval.run_eval --update-baseline
 - `run_eval.py` — the CLI: runs `src.chart_extraction.extract_time_series` over
   the manifest, aggregates per category, and (unless `--compare-to ""`) fails
   if any category regressed past a fixed tolerance vs `eval/history/baseline.json`.
+- `history.py` — appends a run's report (`--record`) to `eval/history/eval.db`
+  (SQLite, tracked in git): one row per `(run, category)` and one row per
+  `(run, chart)`, so a metric's trend over time, or one specific chart's
+  history across runs, is a query instead of diffing JSON files by hand.
+- `report.py` — renders `eval/history/eval.db` into a self-contained
+  `eval/history/report.html`: a trend chart per metric for every category,
+  plus its latest snapshot. Not tracked in git — regenerate anytime the db
+  changes.
 
 ## What "ground truth" means here
 
