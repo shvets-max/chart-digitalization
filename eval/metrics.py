@@ -8,11 +8,9 @@ All metrics are computed over (date, series) cells that exist in `expected`,
 falling back to `None` for any date `extracted` is missing entirely.
 """
 
-from typing import Optional
-
 from eval.manifest import ExpectedSeries
 
-ExtractedSeries = dict[object, list[Optional[float]]]
+ExtractedSeries = dict[object, list[float | None]]
 
 
 def _paired_values(
@@ -44,7 +42,7 @@ def resolved_fraction(
 
 def mae(
     expected: ExpectedSeries, extracted: ExtractedSeries, n_series: int
-) -> Optional[float]:
+) -> float | None:
     """Mean absolute error over jointly-resolved cells; `None` if nothing resolved."""
     pairs = _paired_values(expected, extracted, n_series)
     if not pairs:
@@ -54,7 +52,7 @@ def mae(
 
 def rmse(
     expected: ExpectedSeries, extracted: ExtractedSeries, n_series: int
-) -> Optional[float]:
+) -> float | None:
     """Root-mean-square error over jointly-resolved cells; `None` if nothing resolved."""
     pairs = _paired_values(expected, extracted, n_series)
     if not pairs:
@@ -64,7 +62,7 @@ def rmse(
 
 def normalized_mae(
     expected: ExpectedSeries, extracted: ExtractedSeries, n_series: int
-) -> Optional[float]:
+) -> float | None:
     """MAE divided by the ground truth's own value range (max - min), so error is
     comparable across charts with different units/scale. `None` if nothing resolved
     or the ground truth is constant (zero range)."""

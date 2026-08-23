@@ -9,12 +9,11 @@ this the same way: greedy best-match by error, not position).
 """
 
 from datetime import date
-from typing import Optional
 
 from eval.manifest import ExpectedSeries
 
-RawTimeSeries = list[tuple[object, list[Optional[float]]]]
-ExtractedSeries = dict[date, list[Optional[float]]]
+RawTimeSeries = list[tuple[object, list[float | None]]]
+ExtractedSeries = dict[date, list[float | None]]
 
 
 def _series_by_index(raw_time_series: RawTimeSeries, n_series: int) -> list[dict]:
@@ -27,7 +26,7 @@ def _series_by_index(raw_time_series: RawTimeSeries, n_series: int) -> list[dict
     return by_series
 
 
-def _mean_abs_error(expected_col: dict, got_col: dict) -> Optional[float]:
+def _mean_abs_error(expected_col: dict, got_col: dict) -> float | None:
     common = [d for d in expected_col if got_col.get(d) is not None]
     if not common:
         return None

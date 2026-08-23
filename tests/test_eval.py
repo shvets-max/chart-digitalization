@@ -1,7 +1,9 @@
 import os
+import tempfile
 from datetime import date
 from unittest import TestCase
 
+from eval import history as eval_history
 from eval.align import align_extracted_to_expected
 from eval.manifest import CATEGORIES, REPO_ROOT, discover_entries, load_ground_truth
 from eval.metrics import (
@@ -11,6 +13,7 @@ from eval.metrics import (
     rmse,
     series_count_match,
 )
+from eval.report import build_report
 from eval.run_eval import aggregate, compare
 
 D1, D2, D3 = date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 3)
@@ -161,3 +164,97 @@ class TestAggregateAndCompare(TestCase):
         )
         current = aggregate([self._row("a", 0.90, 0.01)])
         self.assertEqual(compare(current, baseline), [])
+
+
+def _fake_report(git_sha: str, resolved_fraction_: float) -> dict:
+    """A full run_eval.run()-shaped report, for exercising history.py/report.py
+    without running actual extraction."""
+    category_stats = {
+        "n_charts": 1,
+        "resolved_fraction": resolved_fraction_,
+        "mae": 1.0,
+        "rmse": 1.0,
+        "mae_norm": 0.1,
+        "series_count_accuracy": 1.0,
+        "runtime_s": 0.1,
+    }
+    return {
+        "run_at": "2026-01-01T00:00:00+00:00",
+        "git_sha": git_sha,
+        "manifest": "eval/ground_truth/v1.jsonl",
+        "overall": dict(category_stats),
+        "by_category": {"linear_scaled": dict(category_stats)},
+        "per_chart": [
+            {
+                "id": "linear_scaled_0",
+                "category": "linear_scaled",
+                "resolved_fraction": resolved_fraction_,
+                "mae": 1.0,
+                "rmse": 1.0,
+                "mae_norm": 0.1,
+                "series_count_match": True,
+                "runtime_s": 0.1,
+            }
+        ],
+    }
+
+
+class TestHistory(TestCase):
+    """eval.history's SQLite-backed record/query, against a temp db per test."""
+
+    def test_record_and_list_runs(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = os.path.join(tmp_dir, "eval.db")
+            eval_history.record_run(_fake_report("aaa111", 1.0), db_path)
+            eval_history.record_run(_fake_report("bbb222", 0.8), db_path)
+
+            runs = eval_history.list_runs(db_path)
+            self.assertEqual([r["git_sha"] for r in runs], ["aaa111", "bbb222"])
+
+    def test_category_history_is_ordered_oldest_first(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = os.path.join(tmp_dir, "eval.db")
+            eval_history.record_run(_fake_report("aaa111", 1.0), db_path)
+            eval_history.record_run(_fake_report("bbb222", 0.8), db_path)
+
+            history = eval_history.category_history("linear_scaled", db_path)
+            self.assertEqual([row["resolved_fraction"] for row in history], [1.0, 0.8])
+
+            overall = eval_history.category_history("overall", db_path)
+            self.assertEqual(len(overall), 2)
+
+    def test_categories_lists_overall_and_chart_categories(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = os.path.join(tmp_dir, "eval.db")
+            eval_history.record_run(_fake_report("aaa111", 1.0), db_path)
+            self.assertEqual(
+                set(eval_history.categories(db_path)), {"overall", "linear_scaled"}
+            )
+
+    def test_chart_history_tracks_one_chart_across_runs(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = os.path.join(tmp_dir, "eval.db")
+            eval_history.record_run(_fake_report("aaa111", 1.0), db_path)
+            eval_history.record_run(_fake_report("bbb222", 0.8), db_path)
+
+            history = eval_history.chart_history("linear_scaled_0", db_path)
+            self.assertEqual([row["resolved_fraction"] for row in history], [1.0, 0.8])
+
+
+class TestReport(TestCase):
+    """eval.report.build_report against a temp db."""
+
+    def test_empty_db_reports_no_runs(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = os.path.join(tmp_dir, "eval.db")
+            html = build_report(db_path)
+            self.assertIn("No eval runs recorded", html)
+
+    def test_renders_category_section_with_chart_images(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = os.path.join(tmp_dir, "eval.db")
+            eval_history.record_run(_fake_report("aaa111", 1.0), db_path)
+
+            html = build_report(db_path)
+            self.assertIn("linear_scaled", html)
+            self.assertIn("data:image/png;base64,", html)
