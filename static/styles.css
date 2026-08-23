@@ -320,7 +320,7 @@ main { max-width: 1180px; margin: 0 auto; display: grid; gap: 20px; }
 .check { display: flex; align-items: center; gap: 8px; cursor: pointer; }
 .check input { width: 15px; height: 15px; accent-color: var(--series-1); }
 .field { display: grid; gap: 4px; font-size: 13px; color: var(--text-secondary); }
-.field select {
+.field select, .field input, .field textarea {
   padding: 6px 8px;
   border: 1px solid var(--baseline);
   border-radius: 6px;
@@ -328,6 +328,7 @@ main { max-width: 1180px; margin: 0 auto; display: grid; gap: 20px; }
   color: var(--text-primary);
   font: inherit;
 }
+.field textarea { resize: vertical; }
 .slider { display: grid; gap: 4px; font-size: 13px; color: var(--text-secondary); }
 .slider input { width: 100%; accent-color: var(--series-1); }
 .slider output { float: right; color: var(--text-primary); font-variant-numeric: tabular-nums; }
@@ -419,6 +420,19 @@ main { max-width: 1180px; margin: 0 auto; display: grid; gap: 20px; }
 .series-menu-rename-actions { display: flex; gap: 6px; }
 .series-menu-rename-actions .button { flex: 1 1 auto; padding: 5px 8px; font-size: 12px; }
 
+/* Native <dialog>: used for the "Save to test set" form. */
+.dialog {
+  width: min(420px, calc(100vw - 32px));
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px;
+  background: var(--surface-1);
+  color: var(--text-primary);
+}
+.dialog::backdrop { background: rgba(0, 0, 0, 0.4); }
+.dialog form { display: grid; gap: 12px; }
+.dialog .hint { margin: -4px 0 4px; }
+
 /* Data table */
 .data-table { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 12px; }
 .data-table summary { cursor: pointer; font-weight: 500; }
@@ -428,3 +442,22 @@ table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nu
 th, td { padding: 5px 10px; text-align: left; border-bottom: 1px solid var(--gridline); font-size: 13px; }
 th { position: sticky; top: 0; background: var(--surface-1); color: var(--text-secondary); font-weight: 500; }
 td { color: var(--text-primary); }
+
+/* review.html: staged ground-truth submissions */
+.staged-list { display: grid; gap: 14px; margin-top: 16px; }
+.staged-card { display: flex; gap: 14px; padding: 14px; border: 1px solid var(--border); border-radius: 8px; }
+.staged-thumb {
+  width: 160px;
+  height: 100px;
+  object-fit: contain;
+  background: var(--page);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  flex: none;
+}
+.staged-body { flex: 1 1 auto; min-width: 0; display: grid; gap: 6px; align-content: start; }
+.staged-title { margin: 0; font-weight: 600; }
+.staged-meta { margin: 0; color: var(--text-secondary); font-size: 13px; }
+.staged-notes { margin: 0; color: var(--text-secondary); font-size: 13px; font-style: italic; }
+.staged-actions { display: flex; gap: 8px; margin-top: 2px; }
+.empty-note { color: var(--text-muted); }

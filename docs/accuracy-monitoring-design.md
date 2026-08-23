@@ -1,17 +1,19 @@
 # Accuracy monitoring for chart extraction — design & rollout plan
 
-> **Status**: Phases 1-2 are implemented in `eval/` — see `eval/README.md`.
-> They deviate from §2/§6/§8 below in a few deliberate ways: rather than
-> copying fixtures into a new `ground_truth/canonical/` tree, the manifest
-> (`eval/ground_truth/v1.jsonl`) references the existing `tests/data/<category>/`
-> fixtures in place, and ground truth stayed in the wide CSV format
+> **Status**: Phases 1-3 are implemented — see `eval/README.md`. They deviate
+> from §2/§6/§8 below in a few deliberate ways: rather than copying every
+> fixture into a new `ground_truth/canonical/` tree upfront, only *promoted*
+> charts live there (`eval/ground_truth/canonical/<version>/charts/<id>/`) —
+> the synthetic fixtures still live in, and are read from, `tests/data/<category>/`
+> in place, and ground truth stayed in the wide CSV format
 > (`date;series1;series2;...`) `tests/data_generation.py` already produces
-> rather than migrating to long format — both avoid duplicating data that was
-> already in the right shape. The metrics history db (`eval/history/eval.db`)
-> is recorded by an explicit `--record` flag, not a nightly job — no scheduled
-> full run exists yet, so the dashboard only grows when someone runs it.
-> Phases 3-4 (the `promote-to-testset` endpoint, the production feedback loop)
-> are still just this plan, not yet built.
+> rather than migrating to long format. `eval/manifest.py` merges both sources.
+> The metrics history db (`eval/history/eval.db`) is recorded by an explicit
+> `--record` flag, not a nightly job — no scheduled full run exists yet, so the
+> dashboard only grows when someone runs it. Phase 4 (the production feedback
+> loop — an opt-in "contribute this correction" prompt after modify-mode edits)
+> is still just this plan, not yet built; phase 3's `promote-to-testset`
+> endpoint exists but nothing in the UI calls it yet.
 
 Goal: a growing, versioned ground-truth test set plus an eval harness that tracks
 extraction quality (MAE, Resolved Fraction, …) over time and per commit, and a

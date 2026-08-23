@@ -1,11 +1,12 @@
-# Accuracy eval (Phases 1-2)
+# Accuracy eval (Phases 1-3)
 
-Implements phases 1-2 of `docs/accuracy-monitoring-design.md`: a ground-truth
-manifest, a metrics harness, a CI regression gate, a SQLite metrics history,
-and a static HTML dashboard. There's no nightly job that runs the eval and
-records it automatically — `--record` is a manual/CI-triggered step for now.
-Phases 3-4 (the ground-truth authoring endpoint and the production feedback
-loop) are not built yet.
+Implements phases 1-3 of `docs/accuracy-monitoring-design.md`: a ground-truth
+manifest, a metrics harness, a CI regression gate, a SQLite metrics history, a
+static HTML dashboard, and a staging/review flow for turning a chart's
+hand-corrected series into a new ground-truth entry. There's no nightly job
+that runs the eval and records it automatically — `--record` is a manual/
+CI-triggered step for now. Phase 4 (an opt-in "contribute this correction" UI
+prompt, wired to the endpoint below) is not built yet.
 
 ## Usage
 
@@ -28,15 +29,23 @@ python -m eval.run_eval --record
 
 # Regenerate the dashboard (eval/history/report.html) from the history db
 python -m eval.report
+
+# List/approve/reject charts staged via POST /api/charts/{id}/promote-to-testset
+python -m eval.promote --list
+python -m eval.promote --approve <id>
+python -m eval.promote --reject <id>
 ```
 
 ## Layout
 
 - `manifest.py` — discovers the paired `<id>.png`/`<id>.csv` fixtures under
-  `tests/data/<category>/` and records them as `ground_truth/v1.jsonl`, so a
+  `tests/data/<category>/`, plus any chart promoted into
+  `ground_truth/canonical/<version>/charts/<id>/` (see `authoring.py`/
+  `promote.py` below), and records them all as `ground_truth/v1.jsonl`, so a
   run works off an explicit chart list rather than a live directory scan.
-  Ground truth stays where it already lived (`tests/data/`) rather than being
-  copied elsewhere — same CSVs `tests/test_chart_extraction.py` already reads.
+  Synthetic fixtures stay where they already lived (`tests/data/`) rather than
+  being copied elsewhere — same CSVs `tests/test_chart_extraction.py` already
+  reads.
 - `align.py` — extraction's series order isn't guaranteed to match the CSV's
   column order (see `TestMultilineExtraction` in `tests/test_chart_extraction.py`);
   matches predicted series to ground-truth columns by lowest error, greedily.
@@ -53,12 +62,25 @@ python -m eval.report
   `eval/history/report.html`: a trend chart per metric for every category,
   plus its latest snapshot. Not tracked in git — regenerate anytime the db
   changes.
+- `authoring.py` — `POST /api/charts/{id}/promote-to-testset`
+  (`api/api.py::promote_to_testset`) calls `stage_chart` here to write a
+  chart's current (corrected/renamed/removed) series into
+  `ground_truth/staging/<id>/` as `image.<ext>` + `series.csv` + `meta.json`.
+  Also computes `correction_fraction` — the share of (date, series) cells that
+  differ from the chart's pristine, uncorrected extraction — an always-on
+  proxy for extraction quality even before a chart is reviewed.
+- `promote.py` — CLI to review staged entries and move (`--approve`) or
+  discard (`--reject`) them. Promotion is always this explicit, human step;
+  the endpoint itself never writes into `canonical/`.
 
 ## What "ground truth" means here
 
-Phase 1 only covers the synthetic fixtures `tests/data_generation.py` already
-produces — there's no real-chart or manually-corrected entry yet. That's phase
-3 in the design doc (`promote-to-testset` endpoint + staging/review flow).
+Phase 1 covered only the synthetic fixtures `tests/data_generation.py`
+produces. Phase 3 adds a second source: a real chart, corrected in the app's
+existing modify-mode UI, staged via `promote-to-testset` and promoted by a
+human via `eval.promote`. Nothing in the frontend calls the endpoint yet
+(that's phase 4) — for now it's reachable directly, e.g. from the browser's
+dev console or a script, once a chart has been extracted and corrected.
 
 ## Regression tolerances
 

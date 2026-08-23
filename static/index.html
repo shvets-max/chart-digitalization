@@ -11,6 +11,7 @@
   <header class="page-header">
     <h1>Chart Digitalization</h1>
     <p class="subtitle">Upload a chart image to recover the time series behind it.</p>
+    <p class="subtitle"><a href="/static/review.html">Review staged ground-truth submissions &rarr;</a></p>
   </header>
 
   <main>
@@ -35,6 +36,7 @@
         </div>
         <div class="badges" id="badges"></div>
         <div class="header-actions">
+          <button type="button" class="button" id="save-testset-button">Save to test set&hellip;</button>
           <button type="button" class="button" id="fullscreen-toggle">Full screen</button>
         </div>
       </div>
@@ -175,6 +177,32 @@
     <button type="button" class="series-menu-item" id="series-menu-modify" role="menuitem">Modify&hellip;</button>
     <button type="button" class="series-menu-item series-menu-item-danger" id="series-menu-remove" role="menuitem">Remove series</button>
   </div>
+
+  <dialog class="dialog" id="testset-dialog">
+    <form method="dialog" id="testset-form">
+      <h2 class="panel-title">Save to test set</h2>
+      <p class="hint">
+        Stages this chart's current series -- corrections, renames and removals
+        already applied -- for a reviewer to check before it becomes ground
+        truth for the accuracy eval.
+      </p>
+      <label class="field">
+        <span>Category</span>
+        <input type="text" id="testset-category" list="testset-category-options"
+          required placeholder="e.g. scrab_style">
+        <datalist id="testset-category-options"></datalist>
+      </label>
+      <label class="field">
+        <span>Notes <span class="muted">(optional)</span></span>
+        <textarea id="testset-notes" rows="3" placeholder="Anything a reviewer should know"></textarea>
+      </label>
+      <p class="status" id="testset-status" role="status" aria-live="polite"></p>
+      <div class="series-menu-rename-actions">
+        <button type="submit" class="button button-primary" id="testset-submit">Save</button>
+        <button type="button" class="button" id="testset-cancel">Cancel</button>
+      </div>
+    </form>
+  </dialog>
 
   <script src="/static/app.js"></script>
 </body>
