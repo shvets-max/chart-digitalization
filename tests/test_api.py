@@ -1,6 +1,23 @@
-from unittest import TestCase
+import os
+import tempfile
+from unittest import TestCase, mock
 
-from api.api import SeriesEditBody, _apply_series_edits, _series_payload
+from fastapi import HTTPException
+
+from api.api import (
+    PromoteToTestsetBody,
+    SeriesEditBody,
+    StoredChart,
+    _apply_series_edits,
+    _series_payload,
+    approve_staged_testset_entry,
+    get_staged_testset_image,
+    get_testset_categories,
+    list_staged_testset,
+    promote_to_testset,
+    reject_staged_testset_entry,
+    store,
+)
 from src.chart_extraction import ChartExtraction
 from src.function import Linear
 
@@ -249,3 +266,145 @@ class TestApplySeriesEdits(TestCase):
         self.assertEqual(
             _apply_series_edits(self.extraction, self.base, edits), self.base
         )
+
+
+class TestPromoteToTestset(TestCase):
+    """POST .../promote-to-testset resolves the chart's current (corrected/
+    renamed/removed) series the same way the CSV export does, and hands them to
+    eval.authoring.stage_chart."""
+
+    def _add_chart(self, **overrides) -> StoredChart:
+        base_time_series = [(0.0, [10.0, 1.0]), (1.0, [20.0, 2.0])]
+        extraction = _extraction(
+            series_names=["Revenue", "Dropped"], time_series=list(base_time_series)
+        )
+        chart = StoredChart(
+            chart_id="test-promote-chart",
+            filename="my-chart.png",
+            media_type="image/png",
+            image_bytes=b"fake-png-bytes",
+            image_data=None,
+            grid_data=None,
+            extraction=extraction,
+            base_time_series=base_time_series,
+            **overrides,
+        )
+        store.add(chart)
+        self.addCleanup(store.remove, chart.chart_id)
+        return chart
+
+    def test_stages_corrected_series_excluding_removed(self):
+        chart = self._add_chart(removed_series={1})
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with mock.patch("eval.authoring.STAGING_DIR", tmp_dir):
+                meta = promote_to_testset(
+                    chart.chart_id,
+                    PromoteToTestsetBody(category="scrab_style", notes="looks right"),
+                )
+            with open(os.path.join(tmp_dir, meta["id"], "series.csv")) as f:
+                content = f.read()
+
+        self.assertEqual(meta["category"], "scrab_style")
+        self.assertEqual(meta["n_series"], 1)  # "Dropped" excluded
+        self.assertEqual(meta["correction_fraction"], 0.0)  # no edits applied yet
+        self.assertIn("date;Revenue", content)
+        self.assertNotIn("Dropped", content)
+
+    def test_correction_fraction_reflects_hand_drawn_edits(self):
+        chart = self._add_chart()
+        chart.extraction.time_series = [(0.0, [10.0, 1.0]), (1.0, [99.0, 2.0])]
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            mock.patch("eval.authoring.STAGING_DIR", tmp_dir),
+        ):
+            meta = promote_to_testset(
+                chart.chart_id, PromoteToTestsetBody(category="scrab_style")
+            )
+        self.assertAlmostEqual(meta["correction_fraction"], 1 / 4)
+
+    def test_raises_when_chart_has_no_series(self):
+        chart = self._add_chart()
+        chart.extraction.time_series = []
+        with self.assertRaises(HTTPException):
+            promote_to_testset(chart.chart_id, PromoteToTestsetBody(category="x"))
+
+
+class TestTestsetReviewEndpoints(TestCase):
+    """The reviewer-facing endpoints (list/image/approve/reject staged entries)
+    read/write through eval.authoring.STAGING_DIR and eval.manifest.CANONICAL_DIR
+    at call time, so patching those module attributes redirects them to a temp
+    dir without touching the real ground-truth store."""
+
+    def _stage_one(self, staging_dir: str, **overrides) -> dict:
+        with mock.patch("eval.authoring.STAGING_DIR", staging_dir):
+            chart = StoredChart(
+                chart_id="test-review-chart",
+                filename="chart.png",
+                media_type="image/png",
+                image_bytes=b"fake-bytes",
+                image_data=None,
+                grid_data=None,
+                extraction=_extraction(
+                    series_names=["Actual"], time_series=[(0.0, [1.0])]
+                ),
+                base_time_series=[(0.0, [1.0])],
+            )
+            store.add(chart)
+            self.addCleanup(store.remove, chart.chart_id)
+            return promote_to_testset(
+                chart.chart_id,
+                PromoteToTestsetBody(category="scrab_style", **overrides),
+            )
+
+    def test_get_testset_categories_lists_known_categories(self):
+        result = get_testset_categories()
+        self.assertIn("scrab_style", result["categories"])
+
+    def test_list_staged_is_empty_for_a_fresh_dir(self):
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            mock.patch("eval.authoring.STAGING_DIR", tmp_dir),
+        ):
+            self.assertEqual(list_staged_testset(), {"entries": []})
+
+    def test_list_and_fetch_image_for_a_staged_entry(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            meta = self._stage_one(tmp_dir)
+            with mock.patch("eval.authoring.STAGING_DIR", tmp_dir):
+                listed = list_staged_testset()
+                self.assertEqual([e["id"] for e in listed["entries"]], [meta["id"]])
+
+                response = get_staged_testset_image(meta["id"])
+                self.assertEqual(response.body, b"fake-bytes")
+                self.assertEqual(response.media_type, "image/png")
+
+    def test_fetch_image_for_unknown_entry_404s(self):
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            mock.patch("eval.authoring.STAGING_DIR", tmp_dir),
+            self.assertRaises(HTTPException) as ctx,
+        ):
+            get_staged_testset_image("nope")
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_approve_moves_entry_and_reject_discards_it(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            staging_dir = os.path.join(tmp_dir, "staging")
+            canonical_dir = os.path.join(tmp_dir, "canonical")
+            meta_a = self._stage_one(staging_dir)
+            meta_b = self._stage_one(staging_dir)
+
+            with (
+                mock.patch("eval.authoring.STAGING_DIR", staging_dir),
+                mock.patch("eval.manifest.CANONICAL_DIR", canonical_dir),
+            ):
+                result = approve_staged_testset_entry(meta_a["id"])
+                self.assertEqual(result["approved"], meta_a["id"])
+                self.assertFalse(os.path.isdir(os.path.join(staging_dir, meta_a["id"])))
+
+                reject_staged_testset_entry(meta_b["id"])
+                self.assertFalse(os.path.isdir(os.path.join(staging_dir, meta_b["id"])))
+
+                with self.assertRaises(HTTPException) as ctx:
+                    approve_staged_testset_entry("nope")
+                self.assertEqual(ctx.exception.status_code, 404)

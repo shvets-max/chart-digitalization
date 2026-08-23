@@ -1,6 +1,7 @@
 import csv
 import io
 import logging
+import mimetypes
 import os
 import tempfile
 import uuid
@@ -15,6 +16,9 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from eval import authoring as eval_authoring
+from eval import manifest as eval_manifest
+from eval import promote as eval_promote
 from src.chart_extraction import (
     ChartExtraction,
     ChartGridData,
@@ -85,6 +89,15 @@ class SeriesNamesBody(BaseModel):
     """The complete set of series display names, positional by series index."""
 
     names: list[Optional[str]] = []
+
+
+class PromoteToTestsetBody(BaseModel):
+    """What an annotator provides when saving a chart's current corrected state
+    as a candidate ground-truth entry (see `eval.authoring.stage_chart`)."""
+
+    category: str
+    notes: str = ""
+    annotator: Optional[str] = None
 
 
 @dataclass
@@ -636,6 +649,99 @@ def remove_series(
         raise HTTPException(404, f"Unknown series index: {series_index}")
     chart.removed_series.add(series_index)
     return _chart_payload(chart, grid_source, x_ticks, y_ticks)
+
+
+@app.post(
+    "/api/charts/{chart_id}/promote-to-testset",
+    summary="Stage this chart's corrected series as a candidate ground-truth entry",
+)
+def promote_to_testset(chart_id: str, body: PromoteToTestsetBody = Body(...)) -> dict:
+    """
+    Write the chart's current series (corrections, renames and removals already
+    applied -- the same data the CSV export uses) into
+    `eval/ground_truth/staging/` for later review. Never writes straight into
+    the canonical dataset (see `eval.promote`): an unreviewed correction must
+    not become the baseline every future accuracy run is measured against.
+    """
+    chart = store.get(chart_id)
+    if not chart.extraction.time_series:
+        raise HTTPException(422, "This chart has no extracted series to save")
+
+    series = _series_payload(
+        chart.extraction, chart.series_names_override, chart.removed_series
+    )
+    fraction = eval_authoring.correction_fraction(
+        chart.base_time_series, chart.extraction.time_series
+    )
+    return eval_authoring.stage_chart(
+        image_bytes=chart.image_bytes,
+        image_suffix=os.path.splitext(chart.filename)[1] or ".png",
+        series=series,
+        category=body.category,
+        correction_fraction=fraction,
+        annotator=body.annotator,
+        notes=body.notes,
+    )
+
+
+# --------------------------------------------------------- testset review
+
+
+@app.get("/api/testset/categories", summary="Known ground-truth categories")
+def get_testset_categories() -> dict:
+    """The synthetic categories `tests/data_generation.py` produces, offered as
+    suggestions when staging a chart -- a category outside this list is still
+    accepted, e.g. for a real-world chart shape none of them cover yet."""
+    return {"categories": list(eval_manifest.CATEGORIES)}
+
+
+@app.get("/api/testset/staged", summary="List charts staged for ground-truth review")
+def list_staged_testset() -> dict:
+    return {"entries": eval_authoring.list_staged(eval_authoring.STAGING_DIR)}
+
+
+@app.get(
+    "/api/testset/staged/{entry_id}/image",
+    summary="A staged entry's image, for review",
+)
+def get_staged_testset_image(entry_id: str) -> Response:
+    path = eval_authoring.staged_image_path(entry_id, eval_authoring.STAGING_DIR)
+    if path is None:
+        raise HTTPException(404, f"No staged entry: {entry_id}")
+    media_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
+    with open(path, "rb") as f:
+        return Response(content=f.read(), media_type=media_type)
+
+
+@app.post(
+    "/api/testset/staged/{entry_id}/approve",
+    summary="Promote a staged entry into the canonical ground-truth dataset",
+)
+def approve_staged_testset_entry(entry_id: str) -> dict:
+    try:
+        dest = eval_promote.approve(
+            entry_id,
+            staging_dir=eval_authoring.STAGING_DIR,
+            canonical_dir=eval_manifest.CANONICAL_DIR,
+            version=eval_manifest.CANONICAL_VERSION,
+        )
+    except FileNotFoundError as error:
+        raise HTTPException(404, str(error)) from error
+    except FileExistsError as error:
+        raise HTTPException(409, str(error)) from error
+    return {
+        "approved": entry_id,
+        "dir": os.path.relpath(dest, eval_manifest.REPO_ROOT).replace(os.sep, "/"),
+    }
+
+
+@app.delete("/api/testset/staged/{entry_id}", summary="Discard a staged entry")
+def reject_staged_testset_entry(entry_id: str) -> dict:
+    try:
+        eval_promote.reject(entry_id, staging_dir=eval_authoring.STAGING_DIR)
+    except FileNotFoundError as error:
+        raise HTTPException(404, str(error)) from error
+    return {"rejected": entry_id}
 
 
 @app.get("/api/charts/{chart_id}/image", summary="Original uploaded image")

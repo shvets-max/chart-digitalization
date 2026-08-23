@@ -1,8 +1,10 @@
 """
 Ground-truth manifest: discovers the paired image/CSV fixtures under
-`tests/data/<category>/` and records them as one JSONL file, so an eval run
-works off an explicit, reproducible chart list rather than re-scanning
-directories that may have changed underneath it.
+`tests/data/<category>/` plus any charts promoted from staging (see
+`eval.authoring`/`eval.promote`) under `eval/ground_truth/canonical/<version>/`,
+and records them as one JSONL file, so an eval run works off an explicit,
+reproducible chart list rather than re-scanning directories that may have
+changed underneath it.
 
 CSVs are the same wide format `tests/test_chart_extraction.py` already reads:
 `date;series1;series2;...`, one row per date, semicolon-separated.
@@ -17,6 +19,8 @@ from datetime import date, datetime
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_DATASET_DIR = os.path.join(REPO_ROOT, "tests", "data")
 DEFAULT_MANIFEST_PATH = os.path.join(REPO_ROOT, "eval", "ground_truth", "v1.jsonl")
+CANONICAL_DIR = os.path.join(REPO_ROOT, "eval", "ground_truth", "canonical")
+CANONICAL_VERSION = "v1"
 
 # Every category tests/data_generation.py currently produces. A chart lands
 # here as soon as it's promoted from a one-off diagnosis fixture into a
@@ -48,6 +52,19 @@ class ChartEntry:
 
 
 def discover_entries(
+    dataset_dir: str = DEFAULT_DATASET_DIR,
+    categories=CATEGORIES,
+    canonical_dir: str = CANONICAL_DIR,
+    canonical_version: str = CANONICAL_VERSION,
+) -> list[ChartEntry]:
+    """Every synthetic fixture under `dataset_dir` plus every chart promoted into
+    `canonical_dir/<canonical_version>/`."""
+    return _discover_synthetic_entries(
+        dataset_dir, categories
+    ) + _discover_canonical_entries(canonical_dir, canonical_version)
+
+
+def _discover_synthetic_entries(
     dataset_dir: str = DEFAULT_DATASET_DIR, categories=CATEGORIES
 ) -> list[ChartEntry]:
     """Pair up every `<id>.png` / `<id>.csv` found in each category dir under `dataset_dir`."""
@@ -71,6 +88,46 @@ def discover_entries(
                     csv_path=_relpath(csv_path),
                 )
             )
+    return entries
+
+
+def _discover_canonical_entries(
+    canonical_dir: str = CANONICAL_DIR, version: str = CANONICAL_VERSION
+) -> list[ChartEntry]:
+    """Every `eval.authoring.stage_chart`-shaped entry (`image.<ext>` + `series.csv`
+    + `meta.json`) promoted into `canonical_dir/<version>/charts/<id>/` (see
+    `eval.promote.approve`)."""
+    charts_dir = os.path.join(canonical_dir, version, "charts")
+    if not os.path.isdir(charts_dir):
+        return []
+    entries = []
+    for chart_id in sorted(os.listdir(charts_dir)):
+        entry_dir = os.path.join(charts_dir, chart_id)
+        meta_path = os.path.join(entry_dir, "meta.json")
+        csv_path = os.path.join(entry_dir, "series.csv")
+        if not (os.path.isfile(meta_path) and os.path.isfile(csv_path)):
+            continue
+        image_path = next(
+            (
+                os.path.join(entry_dir, f)
+                for f in sorted(os.listdir(entry_dir))
+                if os.path.splitext(f)[0] == "image"
+            ),
+            None,
+        )
+        if image_path is None:
+            continue
+        with open(meta_path) as f:
+            meta = json.load(f)
+        entries.append(
+            ChartEntry(
+                id=chart_id,
+                category=meta.get("category", "unknown"),
+                image_path=_relpath(image_path),
+                csv_path=_relpath(csv_path),
+                source=meta.get("source", "production"),
+            )
+        )
     return entries
 
 

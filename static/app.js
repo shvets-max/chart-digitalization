@@ -421,6 +421,73 @@ async function removeSeries(index) {
   }
 }
 
+/* -------------------------------------------------------- save to test set */
+
+// Loaded lazily so the dialog opens instantly even if this fetch is slow; a
+// failure here just leaves the category field free-text, still submittable.
+let testsetCategoriesLoaded = false;
+
+async function openTestsetDialog() {
+  if (!state.chart) return;
+  el("testset-category").value = "";
+  el("testset-notes").value = "";
+  setTestsetStatus("");
+  await populateTestsetCategories();
+  el("testset-dialog").showModal();
+  el("testset-category").focus();
+}
+
+async function populateTestsetCategories() {
+  if (testsetCategoriesLoaded) return;
+  try {
+    const response = await fetch("/api/testset/categories");
+    if (!response.ok) return;
+    const payload = await response.json();
+    const datalist = el("testset-category-options");
+    datalist.innerHTML = "";
+    for (const category of payload.categories || []) {
+      const option = document.createElement("option");
+      option.value = category;
+      datalist.appendChild(option);
+    }
+    testsetCategoriesLoaded = true;
+  } catch {
+    // Best-effort suggestions only.
+  }
+}
+
+function setTestsetStatus(message, kind = "") {
+  const status = el("testset-status");
+  status.textContent = message;
+  status.className = `status${kind ? ` is-${kind}` : ""}`;
+}
+
+async function submitTestsetForm(event) {
+  event.preventDefault();
+  if (!state.chart) return;
+  const category = el("testset-category").value.trim();
+  if (!category) return;
+  const notes = el("testset-notes").value.trim();
+
+  el("testset-submit").disabled = true;
+  setTestsetStatus("Saving…", "busy");
+  try {
+    const response = await fetch(`/api/charts/${state.chart.id}/promote-to-testset`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ category, notes }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || response.statusText);
+    el("testset-dialog").close();
+    setStatus(`Staged "${payload.id}" for the test set -- pending review.`);
+  } catch (error) {
+    setTestsetStatus(error.message || "Saving failed.", "error");
+  } finally {
+    el("testset-submit").disabled = false;
+  }
+}
+
 /* ------------------------------------------------------ series drag-to-swap */
 
 function handleSeriesDragStart(event) {
@@ -1726,6 +1793,10 @@ function bindControls() {
 
   el("fullscreen-toggle").addEventListener("click", toggleFullscreen);
   window.addEventListener("keydown", handleKeyDown);
+
+  el("save-testset-button").addEventListener("click", openTestsetDialog);
+  el("testset-form").addEventListener("submit", submitTestsetForm);
+  el("testset-cancel").addEventListener("click", () => el("testset-dialog").close());
 }
 
 /* Escape backs out of one layer at a time (menu, then the point being placed,
